@@ -331,7 +331,7 @@ if __name__ == "__main__":
                                                          "saved")
     argument_parser.add_argument("-n", "--top-n", type=int,
                                  help="Defines the amount of top documents per topic that will be analyzed in order to "
-                                      "infer the keyphrases for each topic.")
+                                      "infer the keyphrases for each topic.", default=100)
     argument_parser.add_argument("-o", "--output-name", help="Name to be associated with the output files. If omitted "
                                                              "the name of the produced files is inferred as a "
                                                              "timestamp in the form of "
