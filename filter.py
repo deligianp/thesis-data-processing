@@ -66,16 +66,16 @@ def filter_corpus(filter_ref, reader_ref, output_dir_path, *input_file_paths, ou
                 "Filter must be defined either in src.core.train.filters or in application.filters. Given filter '{}' "
                 "was not found".format(filter_name)
             )
-        filter_factory = FILTERS_DICT[filter_name]()
+        # filter_factory = FILTERS_DICT[filter_name]()
         filter_arguments = []
         if len(filter_ref) > 0:
             filter_arguments = filter_ref[1:]
         logger.debug("Argument filter_ref successfully identified as a filter configuration string.")
         logger.debug("Attempting to create a filter using any defined arguments.")
-        filter_function = filter_factory.create_filter(*filter_arguments)
+        filter_obj = FILTERS_DICT[filter_name](*filter_arguments)
     else:
         logger.debug("Argument filter_ref successfully identified as a callable.")
-        filter_function = filter_ref
+        filter_obj = filter_ref
 
     # If reader_ref is not a corpus_readers.BaseReader subclass, treat it as the lowercase name of a reader class,
     # without the "Reader" ending
@@ -151,7 +151,7 @@ def filter_corpus(filter_ref, reader_ref, output_dir_path, *input_file_paths, ou
     documents_loaded = 0
 
     logger.debug("Creating multiprocessor.")
-    multiprocessor = parallel.Multiprocessor(filter_function, workers, output_dir_path, output_file_name,
+    multiprocessor = parallel.Multiprocessor(filter_obj.perform_filter, workers, output_dir_path, output_file_name,
                                     logger=logger, buffer_size=10000)
     logger.debug("Initiating workers. Workers on stand-by.")
     multiprocessor.start()

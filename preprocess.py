@@ -90,16 +90,16 @@ def preprocess_corpus(preprocessor_ref, reader_ref, output_dir_path, *input_file
                 "Preprocessor must be defined either in src.core.train.preprocessors or in application.preprocessors. "
                 "Given preprocessor '{}' was not found".format(preprocessor_name)
             )
-        preprocessor_factory = PREPROCESSORS_DICT[preprocessor_name]()
+        # preprocessor_factory = PREPROCESSORS_DICT[preprocessor_name]()
         preprocessor_arguments = []
         if len(preprocessor_ref) > 0:
             preprocessor_arguments = preprocessor_ref[1:]
         logger.debug("Argument preprocessor_ref successfully identified as a preprocessor configuration string.")
         logger.debug("Attempting to create a preprocessor using any defined arguments.")
-        preprocessor_function = preprocessor_factory.create_preprocessor(*preprocessor_arguments)
+        preprocessor_obj = PREPROCESSORS_DICT[preprocessor_name](*preprocessor_arguments)
     else:
         logger.debug("Argument preprocessor_ref successfully identified as a callable.")
-        preprocessor_function = preprocessor_ref
+        preprocessor_obj = preprocessor_ref
 
     # If reader_ref is not a corpus_readers.BaseReader subclass, treat it as the lowercase name of a reader class,
     # without the "Reader" ending
@@ -191,7 +191,7 @@ def preprocess_corpus(preprocessor_ref, reader_ref, output_dir_path, *input_file
 
     # Initialize a multiprocessor that will execute preprocessing over the specified amount of processes
     logger.debug("Creating multiprocessor.")
-    multiprocessor = parallel.Multiprocessor(preprocessor_function, workers, output_dir_path, output_file_name,
+    multiprocessor = parallel.Multiprocessor(preprocessor_obj.perform_preprocess, workers, output_dir_path, output_file_name,
                                              nonstemmed_file_name, logger=logger, buffer_size=10000)
     logger.debug("Initiating workers. Workers on stand-by.")
     multiprocessor.start()

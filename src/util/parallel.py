@@ -22,6 +22,81 @@ import pickle
 import time
 
 
+def _process_function(target_function, worker_id, input_queue, output_queue, logging_queue, output_path,
+                      number_of_output_files, buffer_size=10000, worker_kwargs=None):
+    worker_output_files = [os.path.join(
+        output_path, ".{}-{}-{}.temp".format(worker_id, i, str(time.time()).replace(".", ""))
+    ) for i in range(number_of_output_files)]
+    worker_buffers = [list() for i in range(len(worker_output_files))]
+    worker_buffers_size = [buffer_size] * len(worker_output_files)
+    worker_logger = logging.getLogger("worker-{}".format(worker_id))
+    worker_logger.setLevel(logging.DEBUG)
+    if logging_queue is None:
+        worker_logger.addHandler(logging.NullHandler())
+    else:
+        worker_logger.addHandler(logging.handlers.QueueHandler(logging_queue))
+    sentinel_captured = False
+    [open(worker_output_file, "wb").close() for worker_output_file in worker_output_files]
+    bf_handles = [None] * len(worker_output_files)
+    # worker_kwargs = copy.deepcopy(self.kwargs_dictionary)
+    if not worker_kwargs:
+        worker_kwargs = dict()
+    worker_kwargs["worker_id"] = worker_id
+    worker_kwargs["worker_logger"] = worker_logger
+    while not sentinel_captured:
+        input_value = input_queue.get()
+        if input_value is not None:
+            # arrived = False
+            try:
+                # if input_value[0] == 12533608:
+                #     worker_logger.debug("pre_pre_temp_save_values: {}".format(input_value[1]))
+                #     arrived = True
+                output_value = target_function(input_value, **worker_kwargs)
+                # if output_value[0][0] == 12533608:
+                #     worker_logger.debug("came out: {}".format(", ".join(output_value[0][1])))
+            except Exception as ex:
+                worker_logger.error(str(ex))
+                continue
+            if output_value is not None:
+                # if output_value[0][0] == 12533608:
+                #     worker_logger.debug("pre_temp_save_values: {}".format(", ".join(output_value[0][1])))
+                for i in range(min(len(worker_output_files), len(output_value))):
+                    result = output_value[i]
+                    worker_buffers[i].append(result)
+                    worker_buffers_size[i] -= 1
+                    if worker_buffers_size[i] < 1:
+                        bf_handles[i] = open(worker_output_files[i], "ab")
+                        pickler = pickle.Pickler(bf_handles[i], protocol=pickle.HIGHEST_PROTOCOL)
+                        while len(worker_buffers[i]) > 0:
+                            value = worker_buffers[i].pop(0)
+                            # if value[0] == 12533608:
+                            #     worker_logger.debug("on_temp_save_values: {}".format(", ".join(value[1])))
+                            pickler.dump(value)
+                        worker_logger.debug(
+                            "Dumped {} results on {}".format(buffer_size, worker_output_files[i]))
+                        worker_buffers_size[i] = buffer_size
+                        if worker_buffers_size[i] > 0:
+                            bf_handles[i].close()
+                            bf_handles[i] = None
+        else:
+            sentinel_captured = True
+    for i in range(len(worker_output_files)):
+        if len(worker_buffers[i]) > 0:
+            if bf_handles[i] is None:
+                bf_handles[i] = open(worker_output_files[i], "ab")
+            pickler = pickle.Pickler(bf_handles[i], protocol=pickle.HIGHEST_PROTOCOL)
+            remaining = len(worker_buffers[i])
+            while len(worker_buffers[i]) > 0:
+                value = worker_buffers[i].pop(0)
+                # if value[0] == 12533608:
+                #     worker_logger.debug("on_temp_save_values: {}".format(", ".join(value[1])))
+                pickler.dump(value)
+            worker_logger.debug("Dumped {} results on {}".format(remaining, worker_output_files[i]))
+        if bf_handles[i] is not None:
+            bf_handles[i].close()
+    output_queue.put(worker_output_files)
+
+
 class Multiprocessor:
 
     def __init__(self, process_function, workers, output_path, *output_file_names, kwargs_dictionary=None, logger=None,
@@ -47,76 +122,76 @@ class Multiprocessor:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-    def _worker_function(self, input_queue, output_queue, worker_id, logging_queue):
-        worker_output_files = [os.path.join(
-            self.output_path, ".{}-{}-{}.temp".format(worker_id, i, str(time.time()).replace(".", ""))
-        ) for i in range(len(self.output_file_names))]
-        worker_buffers = [list() for i in range(len(worker_output_files))]
-        worker_buffers_size = [self.buffer_size] * len(worker_output_files)
-        worker_logger = logging.getLogger("worker-{}".format(worker_id))
-        worker_logger.setLevel(logging.DEBUG)
-        if logging_queue is None:
-            worker_logger.addHandler(logging.NullHandler())
-        else:
-            worker_logger.addHandler(logging.handlers.QueueHandler(logging_queue))
-        sentinel_captured = False
-        [open(worker_output_file, "wb").close() for worker_output_file in worker_output_files]
-        bf_handles = [None] * len(worker_output_files)
-        worker_kwargs = copy.deepcopy(self.kwargs_dictionary)
-        worker_kwargs["worker_id"] = worker_id
-        worker_kwargs["worker_logger"] = worker_logger
-        while not sentinel_captured:
-            input_value = input_queue.get()
-            if input_value is not None:
-                # arrived = False
-                try:
-                    # if input_value[0] == 12533608:
-                    #     worker_logger.debug("pre_pre_temp_save_values: {}".format(input_value[1]))
-                    #     arrived = True
-                    output_value = self.process_function(input_value, **worker_kwargs)
-                    # if output_value[0][0] == 12533608:
-                    #     worker_logger.debug("came out: {}".format(", ".join(output_value[0][1])))
-                except Exception as ex:
-                    worker_logger.error(str(ex))
-                    continue
-                if output_value is not None:
-                    # if output_value[0][0] == 12533608:
-                    #     worker_logger.debug("pre_temp_save_values: {}".format(", ".join(output_value[0][1])))
-                    for i in range(min(len(worker_output_files), len(output_value))):
-                        result = output_value[i]
-                        worker_buffers[i].append(result)
-                        worker_buffers_size[i] -= 1
-                        if worker_buffers_size[i] < 1:
-                            bf_handles[i] = open(worker_output_files[i], "ab")
-                            pickler = pickle.Pickler(bf_handles[i], protocol=pickle.HIGHEST_PROTOCOL)
-                            while len(worker_buffers[i]) > 0:
-                                value = worker_buffers[i].pop(0)
-                                # if value[0] == 12533608:
-                                #     worker_logger.debug("on_temp_save_values: {}".format(", ".join(value[1])))
-                                pickler.dump(value)
-                            worker_logger.debug(
-                                "Dumped {} results on {}".format(self.buffer_size, worker_output_files[i]))
-                            worker_buffers_size[i] = self.buffer_size
-                            if worker_buffers_size[i] > 0:
-                                bf_handles[i].close()
-                                bf_handles[i] = None
-            else:
-                sentinel_captured = True
-        for i in range(len(worker_output_files)):
-            if len(worker_buffers[i]) > 0:
-                if bf_handles[i] is None:
-                    bf_handles[i] = open(worker_output_files[i], "ab")
-                pickler = pickle.Pickler(bf_handles[i], protocol=pickle.HIGHEST_PROTOCOL)
-                remaining = len(worker_buffers[i])
-                while len(worker_buffers[i]) > 0:
-                    value = worker_buffers[i].pop(0)
-                    # if value[0] == 12533608:
-                    #     worker_logger.debug("on_temp_save_values: {}".format(", ".join(value[1])))
-                    pickler.dump(value)
-                worker_logger.debug("Dumped {} results on {}".format(remaining, worker_output_files[i]))
-            if bf_handles[i] is not None:
-                bf_handles[i].close()
-        output_queue.put(worker_output_files)
+    # def _worker_function(self, input_queue, output_queue, worker_id, logging_queue):
+    #     worker_output_files = [os.path.join(
+    #         self.output_path, ".{}-{}-{}.temp".format(worker_id, i, str(time.time()).replace(".", ""))
+    #     ) for i in range(len(self.output_file_names))]
+    #     worker_buffers = [list() for i in range(len(worker_output_files))]
+    #     worker_buffers_size = [self.buffer_size] * len(worker_output_files)
+    #     worker_logger = logging.getLogger("worker-{}".format(worker_id))
+    #     worker_logger.setLevel(logging.DEBUG)
+    #     if logging_queue is None:
+    #         worker_logger.addHandler(logging.NullHandler())
+    #     else:
+    #         worker_logger.addHandler(logging.handlers.QueueHandler(logging_queue))
+    #     sentinel_captured = False
+    #     [open(worker_output_file, "wb").close() for worker_output_file in worker_output_files]
+    #     bf_handles = [None] * len(worker_output_files)
+    #     worker_kwargs = copy.deepcopy(self.kwargs_dictionary)
+    #     worker_kwargs["worker_id"] = worker_id
+    #     worker_kwargs["worker_logger"] = worker_logger
+    #     while not sentinel_captured:
+    #         input_value = input_queue.get()
+    #         if input_value is not None:
+    #             # arrived = False
+    #             try:
+    #                 # if input_value[0] == 12533608:
+    #                 #     worker_logger.debug("pre_pre_temp_save_values: {}".format(input_value[1]))
+    #                 #     arrived = True
+    #                 output_value = self.process_function(input_value, **worker_kwargs)
+    #                 # if output_value[0][0] == 12533608:
+    #                 #     worker_logger.debug("came out: {}".format(", ".join(output_value[0][1])))
+    #             except Exception as ex:
+    #                 worker_logger.error(str(ex))
+    #                 continue
+    #             if output_value is not None:
+    #                 # if output_value[0][0] == 12533608:
+    #                 #     worker_logger.debug("pre_temp_save_values: {}".format(", ".join(output_value[0][1])))
+    #                 for i in range(min(len(worker_output_files), len(output_value))):
+    #                     result = output_value[i]
+    #                     worker_buffers[i].append(result)
+    #                     worker_buffers_size[i] -= 1
+    #                     if worker_buffers_size[i] < 1:
+    #                         bf_handles[i] = open(worker_output_files[i], "ab")
+    #                         pickler = pickle.Pickler(bf_handles[i], protocol=pickle.HIGHEST_PROTOCOL)
+    #                         while len(worker_buffers[i]) > 0:
+    #                             value = worker_buffers[i].pop(0)
+    #                             # if value[0] == 12533608:
+    #                             #     worker_logger.debug("on_temp_save_values: {}".format(", ".join(value[1])))
+    #                             pickler.dump(value)
+    #                         worker_logger.debug(
+    #                             "Dumped {} results on {}".format(self.buffer_size, worker_output_files[i]))
+    #                         worker_buffers_size[i] = self.buffer_size
+    #                         if worker_buffers_size[i] > 0:
+    #                             bf_handles[i].close()
+    #                             bf_handles[i] = None
+    #         else:
+    #             sentinel_captured = True
+    #     for i in range(len(worker_output_files)):
+    #         if len(worker_buffers[i]) > 0:
+    #             if bf_handles[i] is None:
+    #                 bf_handles[i] = open(worker_output_files[i], "ab")
+    #             pickler = pickle.Pickler(bf_handles[i], protocol=pickle.HIGHEST_PROTOCOL)
+    #             remaining = len(worker_buffers[i])
+    #             while len(worker_buffers[i]) > 0:
+    #                 value = worker_buffers[i].pop(0)
+    #                 # if value[0] == 12533608:
+    #                 #     worker_logger.debug("on_temp_save_values: {}".format(", ".join(value[1])))
+    #                 pickler.dump(value)
+    #             worker_logger.debug("Dumped {} results on {}".format(remaining, worker_output_files[i]))
+    #         if bf_handles[i] is not None:
+    #             bf_handles[i].close()
+    #     output_queue.put(worker_output_files)
 
     def feed(self, input_value):
         if self._state is not None:
@@ -153,13 +228,21 @@ class Multiprocessor:
             self._state["processes"] = list()
             for worker_id in range(self._state["num_of_workers"]):
                 p = multiprocessing.Process(
-                    target=self._worker_function,
+                    target=_process_function,
                     name="worker-{}".format(worker_id),
                     args=(
+                        self.process_function,
+                        worker_id,
                         self._state["input_queue"],
                         self._state["output_queue"],
-                        worker_id,
-                        self._state["logging_queue"])
+                        self._state["logging_queue"],
+                        self.output_path,
+                        len(self.output_file_names),
+                    ),
+                    kwargs={
+                        "buffer_size":self.buffer_size,
+                        "worker_kwargs": self.kwargs_dictionary
+                    }
                 )
                 p.start()
                 self._state["processes"].append(p)
@@ -182,6 +265,8 @@ class Multiprocessor:
             if "logging_queue_listener" in self._state:
                 self._state["logging_queue_listener"].enqueue_sentinel()
                 self._state["logging_queue_listener"].stop()
+            for process in self._state["processes"]:
+                process.terminate()
             [bz2.BZ2File(os.path.join(self.output_path, self.output_file_names[i]), "wb").close()
              for i in range(len(self.output_file_names))]
             while not self._state["output_queue"].empty():
@@ -201,11 +286,11 @@ class Multiprocessor:
                                     continue
                                 pickler.dump(output_value)
                                 file_accumulated_records += 1
-                            os.remove(output_files[i])
-                            try:
-                                accumulated_records[i] += file_accumulated_records
-                            except IndexError:
-                                accumulated_records += [0] * (i - len(accumulated_records) + 1)
-                                accumulated_records[i] += file_accumulated_records
+                        os.remove(output_files[i])
+                        try:
+                            accumulated_records[i] += file_accumulated_records
+                        except IndexError:
+                            accumulated_records += [0] * (i - len(accumulated_records) + 1)
+                            accumulated_records[i] += file_accumulated_records
         self._state = None
         return accumulated_records

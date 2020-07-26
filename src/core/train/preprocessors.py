@@ -26,14 +26,14 @@ from src.util import functions
 from src.util import stopwords
 
 
-class BasePreprocessorFactory(metaclass=ABCMeta):
+class BasePreprocessor(metaclass=ABCMeta):
 
     @abstractmethod
-    def create_preprocessor(self, text_data):
+    def perform_preprocess(self, text_data):
         pass
 
 
-class DefaultPreprocessorFactory(BasePreprocessorFactory):
+class DefaultPreprocessor(BasePreprocessor):
     """
     A default implementation of a preprocessor factory.
 
@@ -54,73 +54,52 @@ class DefaultPreprocessorFactory(BasePreprocessorFactory):
     stopwords_set = stopwords.stopwords
     lemmatizer = nltk.stem.WordNetLemmatizer()
     stemmer = nltk.stem.SnowballStemmer("english")
+    minimum_term_length=3
+    minimum_terms_per_document=10
 
     def __init__(self, *args, **kwargs):
-        super(DefaultPreprocessorFactory, self).__init__(*args, **kwargs)
-        logger = kwargs.get("logger", None)
-        functions.nltk_verify_resource("tokenizers/punkt", "punkt", logger=logger)
-        functions.nltk_verify_resource("corpora/wordnet", "wordnet", logger=logger)
+        super(DefaultPreprocessor, self).__init__(*args, **kwargs)
+        functions.nltk_verify_resource("tokenizers/punkt", "punkt")
+        functions.nltk_verify_resource("corpora/wordnet", "wordnet")
 
-    def create_preprocessor(self, *args, **kwargs):
-        try:
-            minimum_terms_per_document = args[0]
-        except IndexError:
-            minimum_terms_per_document = 10
-        try:
-            minimum_term_length = args[1]
-        except IndexError:
-            minimum_term_length = 3
-        logger = kwargs.get("worker_logger", None)
-        if not logger:
-            logger = logging.getLogger(__name__)
-            logger.addHandler(logging.NullHandler())
-
-        # def _filter(input_article_tuple, **kwargs):
-        #     logger.debug("{}: Got article {}".format(kwargs["worker_id"], input_article_tuple[0]))
-        #     try:
-        #         estimated_lang = langdetect.detect(input_article_tuple[1])
-        #         if estimated_lang == language:
-        #             return [input_article_tuple]
-        #     except Exception:
-        #         pass
-        #     return None
-
-        def _preprocess(input_article_tuple, **kwargs):
-            nonstemmed = dict()
-            logger.debug("{}: Got article {}".format(kwargs["worker_id"], input_article_tuple[0]))
-            text = input_article_tuple[1]
-            assert type(text) is str, "Document \"{}\" does not have a string text".format(input_article_tuple[0])
-            assert text != "", "Document \"{}\" has no text".format(input_article_tuple[0])
-
-            table = str.maketrans('', '', string.punctuation.replace('-', ''))
-            no_punctuation = text.lower().translate(table)
-            terms = nltk.tokenize.word_tokenize(no_punctuation)
-            stemmed_terms = list()
-            for term in terms:
-                if term not in self.stopwords_set and term.isalpha():
-                    stemmed = self.stemmer.stem(self.lemmatizer.lemmatize(term))
-                    if len(stemmed) >= minimum_term_length:
-                        stemmed_terms.append(stemmed)
-                        if stemmed not in nonstemmed:
-                            nonstemmed[stemmed] = dict()
-                        if term not in nonstemmed[stemmed]:
-                            nonstemmed[stemmed][term] = 1
-                        else:
-                            nonstemmed[stemmed][term] += 1
-
-            if len(stemmed_terms) >= minimum_terms_per_document:
-                output_article_tuple = *input_article_tuple[:1], " ".join(stemmed_terms), *input_article_tuple[2:]
-                return [output_article_tuple, json.dumps(nonstemmed)]
+    def perform_preprocess(self, input_document_tuple, **kwargs):
+        if "worker_logger" in kwargs:
+            if "worker_id" in kwargs:
+                kwargs["worker_logger"].debug("{}: Got article {}".format(kwargs["worker_id"], input_document_tuple[0]))
             else:
-                raise Exception("Too few terms for document \"{}\"".format(input_article_tuple[0]))
+                kwargs["worker_logger"].debug("Got article {}".format(input_document_tuple[0]))
+        nonstemmed = dict()
+        text = input_document_tuple[1]
+        assert type(text) is str, "Document \"{}\" does not have a string text".format(input_document_tuple[0])
+        assert text != "", "Document \"{}\" has no text".format(input_document_tuple[0])
 
-        return _preprocess
+        table = str.maketrans('', '', string.punctuation.replace('-', ''))
+        no_punctuation = text.lower().translate(table)
+        terms = nltk.tokenize.word_tokenize(no_punctuation)
+        stemmed_terms = list()
+        for term in terms:
+            if term not in self.stopwords_set and term.isalpha():
+                stemmed = self.stemmer.stem(self.lemmatizer.lemmatize(term))
+                if len(stemmed) >= self.minimum_term_length:
+                    stemmed_terms.append(stemmed)
+                    if stemmed not in nonstemmed:
+                        nonstemmed[stemmed] = dict()
+                    if term not in nonstemmed[stemmed]:
+                        nonstemmed[stemmed][term] = 1
+                    else:
+                        nonstemmed[stemmed][term] += 1
+
+        if len(stemmed_terms) >= self.minimum_terms_per_document:
+            output_article_tuple = *input_document_tuple[:1], " ".join(stemmed_terms), *input_document_tuple[2:]
+            return [output_article_tuple, json.dumps(nonstemmed)]
+        else:
+            raise Exception("Too few terms for document \"{}\"".format(input_document_tuple[0]))
 
 
 available_preprocessors = {
-    (cl[0].lower()[:-len("PreprocessorFactory")] if cl[0].endswith("PreprocessorFactory") else cl[0].lower()): cl[1]
+    (cl[0].lower()[:-len("Preprocessor")] if cl[0].endswith("Preprocessor") else cl[0].lower()): cl[1]
     for cl in inspect.getmembers(sys.modules[__name__], inspect.isclass) if
-    (issubclass(cl[1], BasePreprocessorFactory) and cl[0] != "BasePreprocessorFactory")
+    (issubclass(cl[1], BasePreprocessor) and cl[0] != "BasePreprocessor")
 }
 
 custom_preprocessors = importlib.util.find_spec("application.preprocessors")
@@ -128,9 +107,9 @@ if custom_preprocessors is not None:
     loader = custom_preprocessors.loader
     custom_module = loader.load_module()
     for ccl in inspect.getmembers(custom_module, inspect.isclass):
-        if issubclass(ccl[1], BasePreprocessorFactory) and ccl[0] != "BasePreprocessorFactory":
-            if ccl[0].endswith("PreprocessorFactory"):
-                description_string = ccl[0][:-len("PreprocessorFactory")].lower()
+        if issubclass(ccl[1], BasePreprocessor) and ccl[0] != "BasePreprocessor":
+            if ccl[0].endswith("Preprocessor"):
+                description_string = ccl[0][:-len("Preprocessor")].lower()
             else:
                 description_string = ccl[0].lower()
 

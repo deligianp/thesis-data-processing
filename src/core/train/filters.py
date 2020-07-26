@@ -23,14 +23,14 @@ import langdetect
 import nltk
 
 
-class BaseFilterFactory(metaclass=ABCMeta):
+class BaseFilter(metaclass=ABCMeta):
 
     @abstractmethod
-    def create_filter(self, *args, **kwargs):
+    def perform_filter(self, input_document_tuple, **kwargs):
         pass
 
 
-class LanguageFilterFactory(BaseFilterFactory):
+class LanguageFilter(BaseFilter):
     """
     It creates a language filter based on the given language argument.
     
@@ -56,41 +56,42 @@ class LanguageFilterFactory(BaseFilterFactory):
     """
     implemented_languages = {"da", "de", "el", "en", "es", "fi", "fr", "nl", "no", "pt", "ru", "sv"}
 
-    def create_filter(self, *args, **kwargs):
-        language = args[0]
+    def __init__(self, *args, **kwargs):
+        super(LanguageFilter, self).__init__()
+        self.language = args[0]
         try:
-            iterations = int(args[1])
+            self.iterations = int(args[1])
         except IndexError:
-            iterations = 1
-        assert language in self.implemented_languages, "Unknown language defined. Supported languages: " + ", ".join(
-            self.implemented_languages)
-        logger = kwargs.get("worker_logger", None)
-        if not logger:
-            logger = logging.getLogger(__name__)
-            logger.addHandler(logging.NullHandler())
+            self.iterations = 1
+        assert self.language in self.implemented_languages, "Unknown language defined. Supported languages: " + \
+                                                            ", ".join(self.implemented_languages)
+        # logger = kwargs.get("worker_logger", None)
+        # if not logger:
+        #     logger = logging.getLogger(__name__)
+        #     logger.addHandler(logging.NullHandler())
+        # self.logger = logger
 
-        def _filter(input_article_tuple, **kwargs):
+    def perform_filter(self, input_document_tuple, **kwargs):
+        if "worker_logger" in kwargs:
             if "worker_id" in kwargs:
-                logger.debug("{}: Got article {}".format(kwargs["worker_id"], input_article_tuple[0]))
+                kwargs["worker_logger"].debug("{}: Got article {}".format(kwargs["worker_id"], input_document_tuple[0]))
             else:
-                logger.debug("Got article {}".format(input_article_tuple[0]))
-            try:
-                language_estimation_iterations = iterations
-                while True:
-                    estimated_lang = langdetect.detect(input_article_tuple[1])
-                    language_estimation_iterations -= 1
-                    assert estimated_lang == language, "Document \"{}\" failed to classify as a text in language " \
-                                                       "\"{}\"".format(input_article_tuple[0], language)
-                    if language_estimation_iterations == 0:
-                        return [input_article_tuple]
-            except Exception:
-                pass
-            return None
-
-        return _filter
+                kwargs["worker_logger"].debug("Got article {}".format(input_document_tuple[0]))
+        try:
+            language_estimation_iterations = self.iterations
+            while True:
+                estimated_lang = langdetect.detect(input_document_tuple[1])
+                language_estimation_iterations -= 1
+                assert estimated_lang == self.language, "Document \"{}\" failed to classify as a text in language " \
+                                                        "\"{}\"".format(input_document_tuple[0], self.language)
+                if language_estimation_iterations == 0:
+                    return [input_document_tuple]
+        except Exception:
+            pass
+        return None
 
 
-class WordCountFilterFactory(BaseFilterFactory):
+class WordCountFilter(BaseFilter):
     """
     It creates a filter that accepts a document text only when the number of words is within a predefined range.
 
@@ -101,39 +102,34 @@ class WordCountFilterFactory(BaseFilterFactory):
     MINIMUM_AMOUNT and MAXIMUM_AMOUNT is considered inclusive for the edge values.
     """
 
-    def create_filter(self, *args, **kwargs):
-        minimum_amount = int(args[0])
+    def __init__(self, *args, **kwargs):
+        self.minimum_amount = int(args[0])
         try:
-            maximum_amount = int(args[1])
+            self.maximum_amount = int(args[1])
         except IndexError:
-            maximum_amount = math.inf
-        assert minimum_amount < maximum_amount, "Minimum amount of terms must be different and less than the maximum " \
-                                                "amount of terms"
+            self.maximum_amount = math.inf
+        assert self.minimum_amount < self.maximum_amount, "Minimum amount of terms must be different and less than " \
+                                                          "the maximum amount of terms"
 
-        logger = kwargs.get("worker_logger", None)
-        if not logger:
-            logger = logging.getLogger(__name__)
-            logger.addHandler(logging.NullHandler())
-
-        def _filter(input_article_tuple, **kwargs):
+    def perform_filter(self, input_document_tuple, **kwargs):
+        if "worker_logger" in kwargs:
             if "worker_id" in kwargs:
-                logger.debug("{}: Got article {}".format(kwargs["worker_id"], input_article_tuple[0]))
+                kwargs["worker_logger"].debug("{}: Got article {}".format(kwargs["worker_id"], input_document_tuple[0]))
             else:
-                logger.debug("Got article {}".format(input_article_tuple[0]))
-            document_terms = nltk.tokenize.word_tokenize(input_article_tuple[1])
-            assert minimum_amount <= len(document_terms) <= maximum_amount, "Document \"{}\" amount of terms not " \
-                                                                            "between the acceptable range".format(
-                input_article_tuple[0]
-            )
-            return [input_article_tuple]
-
-        return _filter
+                kwargs["worker_logger"].debug("Got article {}".format(input_document_tuple[0]))
+        document_terms = nltk.tokenize.word_tokenize(input_document_tuple[1])
+        assert self.minimum_amount <= len(document_terms) <= self.maximum_amount, "Document \"{}\" amount of terms " \
+                                                                                  "not between the acceptable " \
+                                                                                  "range".format(
+            input_document_tuple[0]
+        )
+        return [input_document_tuple]
 
 
 available_filters = {
-    (cl[0].lower()[:-len("FilterFactory")] if cl[0].endswith("FilterFactory") else cl[0].lower()): cl[1]
+    (cl[0].lower()[:-len("Filter")] if cl[0].endswith("Filter") else cl[0].lower()): cl[1]
     for cl in inspect.getmembers(sys.modules[__name__], inspect.isclass) if
-    (issubclass(cl[1], BaseFilterFactory) and cl[0] != "BaseFilterFactory" and cl[0].endswith("FilterFactory"))
+    (issubclass(cl[1], BaseFilter) and cl[0] != "BaseFilter" and cl[0].endswith("Filter"))
 }
 
 custom_filters = importlib.util.find_spec("application.filters")
@@ -141,9 +137,9 @@ if custom_filters is not None:
     loader = custom_filters.loader
     custom_module = loader.load_module()
     for ccl in inspect.getmembers(custom_module, inspect.isclass):
-        if issubclass(ccl[1], BaseFilterFactory) and ccl[0] != "BaseFilterFactory":
-            if ccl[0].endswith("FilterFactory"):
-                description_string = ccl[0][:-len("FilterFactory")].lower()
+        if issubclass(ccl[1], BaseFilter) and ccl[0] != "BaseFilter":
+            if ccl[0].endswith("Filter"):
+                description_string = ccl[0][:-len("Filter")].lower()
             else:
                 description_string = ccl[0].lower()
 
