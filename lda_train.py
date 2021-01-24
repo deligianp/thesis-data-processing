@@ -26,15 +26,17 @@ import os
 from gensim.corpora import Dictionary
 from gensim.models import LdaModel, LdaMulticore
 
-from src.core.file.readers import Bz2BagReader
+from src.core.file import readers
 from src.util import docfetch
 from src.util import functions
 
 reporting_batch = 10000
+output_extensions = ("lda", "lda.id2word", "lda.expElogbeta.npy", "lda.state")
 
 
-def train_model(number_of_topics, reader, dictionary_path, output_dir_path, output_name=None, logger=None, workers=1,
-                chunk_size=2000, passes=1, iterations=50, file_overwrite_confirmation_function=lambda path: True):
+def train_model(number_of_topics, dictionary_path, output_dir_path, *input_file_paths, output_name=None,
+                logger=None, workers=1, chunk_size=2000, passes=1, iterations=50,
+                file_overwrite_confirmation_function=lambda path: True):
     assert number_of_topics > 1, "Number of topics must be at least 2"
     assert type(number_of_topics) is int, "Number of topics must be an integer"
     assert workers > 0, "At least 1 worker must be used"
@@ -46,6 +48,8 @@ def train_model(number_of_topics, reader, dictionary_path, output_dir_path, outp
     assert iterations > 0, "Number of iterations must be at least 1"
     assert type(iterations) is int, "Number of iterations must be an integer"
 
+    reader = readers.JSONReader(*input_file_paths)
+
     dictionary_path = os.path.abspath(os.path.expanduser(dictionary_path))
     dictionary = Dictionary.load(dictionary_path)
 
@@ -54,7 +58,7 @@ def train_model(number_of_topics, reader, dictionary_path, output_dir_path, outp
 
     if not output_name:
         current_timestamp = datetime.datetime.today()
-        output_name = "lda_model_{}{}{}{}{}{}{}".format(
+        output_name = "lda_model_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             current_timestamp.year,
             current_timestamp.month,
             current_timestamp.day,
@@ -64,11 +68,20 @@ def train_model(number_of_topics, reader, dictionary_path, output_dir_path, outp
             int(current_timestamp.microsecond / 1000)
         )
 
-    output_file_name = output_name + ".lda"
-    output_file_path = os.path.join(output_dir_path, output_file_name)
+    output_file_name_templates = [output_name + "." + extension for extension in output_extensions]
 
-    if not functions.confirm_file_write(output_file_path):
-        exit(0)
+    logger.debug("Trained model' name pattern: {}.".format(output_name))
+
+    logger.debug("Output files will be saved in: {}.".format(output_dir_path))
+
+    # Call the confirmation function for overwriting files, if similar files already exist
+    logger.debug("Checking whether files with the same naming patterns already exist in \"{}\"".format(
+        output_dir_path
+    ))
+    logger.debug("In case files exist, a confirmation for overwriting the files is required.")
+    for extension in output_extensions:
+        if not file_overwrite_confirmation_function(output_dir_path, (output_name, extension)):
+            return
 
     logger.debug(
         "Executing training of an LDA model of {} topics. Reading from files \"{}\" and dictionary at \"{}\"".format(
@@ -76,7 +89,7 @@ def train_model(number_of_topics, reader, dictionary_path, output_dir_path, outp
         )
     )
     logger.debug("Model will be updated every {} documents".format(chunk_size))
-    logger.debug("LDA model will be saved in \"{}\"".format(output_file_path))
+    # logger.debug("LDA model will be saved in \"{}\"".format(output_file_path))
 
     if workers == 1:
         model = LdaModel(num_topics=number_of_topics, id2word=dictionary, passes=passes, iterations=iterations)
@@ -92,18 +105,22 @@ def train_model(number_of_topics, reader, dictionary_path, output_dir_path, outp
         if vectors_seen % reporting_batch == 0:
             logger.info("Read {} vectors".format(vectors_seen))
         if len(batch_buffer) >= chunk_size:
-            model.update([vector[1] for vector in batch_buffer])
+            model.update([vector["content"] for vector in batch_buffer])
             batch_buffer = list()
     if len(batch_buffer) >= 0:
         logger.info("Read {} vectors".format(vectors_seen))
-        model.update([vector[1] for vector in batch_buffer])
+        model.update([vector["content"] for vector in batch_buffer])
         batch_buffer = list()
 
-    model.save(output_file_path)
+    model.save(os.path.join(output_dir_path, output_name + "." + output_extensions[0]))
 
     logger.info("Completed training of LDA model of {} topics and saved it in \"{}\"".format(
-        number_of_topics, os.path.join(output_dir_path, output_file_name)
+        number_of_topics, output_dir_path
     ))
+
+    logger.info("Trained model was saved in:\n\t\"{}\"".format("\"\n\t\"".join(
+        (os.path.join(output_dir_path, file_name) for file_name in output_file_name_templates)
+    )))
 
 
 if __name__ == "__main__":
@@ -162,7 +179,7 @@ if __name__ == "__main__":
     output_name = args_namespace.output_name
     if not output_name:
         current_timestamp = datetime.datetime.today()
-        output_name = "lda_model_{}{}{}{}{}{}{}".format(
+        output_name = "lda_model_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             current_timestamp.year,
             current_timestamp.month,
             current_timestamp.day,
@@ -172,14 +189,13 @@ if __name__ == "__main__":
             int(current_timestamp.microsecond / 1000)
         )
     logger = functions.construct_logger(__name__, output_dir_path, output_name, args_namespace.log_level)
-    file_overwrite_confirmation_function = functions.confirm_file_write
+    file_overwrite_confirmation_function = functions.confirm_batch_file_write
     workers = args_namespace.workers
     chunk_size = args_namespace.chunk_size
     passes = args_namespace.passes
     iterations = args_namespace.iterations
 
-    reader = Bz2BagReader(*input_file_paths)
-
-    train_model(number_of_topics, reader, dictionary_path, output_dir_path, output_name=output_name, logger=logger,
+    train_model(number_of_topics, dictionary_path, output_dir_path, *input_file_paths, output_name=output_name,
+                logger=logger,
                 workers=workers, chunk_size=chunk_size, passes=passes, iterations=iterations,
                 file_overwrite_confirmation_function=file_overwrite_confirmation_function)

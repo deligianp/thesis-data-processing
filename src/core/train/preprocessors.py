@@ -62,16 +62,16 @@ class DefaultPreprocessor(BasePreprocessor):
         functions.nltk_verify_resource("tokenizers/punkt", "punkt")
         functions.nltk_verify_resource("corpora/wordnet", "wordnet")
 
-    def perform_preprocess(self, input_document_tuple, **kwargs):
+    def perform_preprocess(self, input_document_object, **kwargs):
         if "worker_logger" in kwargs:
             if "worker_id" in kwargs:
-                kwargs["worker_logger"].debug("{}: Got article {}".format(kwargs["worker_id"], input_document_tuple[0]))
+                kwargs["worker_logger"].debug("{}: Got article {}".format(kwargs["worker_id"], input_document_object["id"]))
             else:
-                kwargs["worker_logger"].debug("Got article {}".format(input_document_tuple[0]))
+                kwargs["worker_logger"].debug("Got article {}".format(input_document_object["id"]))
         nonstemmed = dict()
-        text = input_document_tuple[1]
-        assert type(text) is str, "Document \"{}\" does not have a string text".format(input_document_tuple[0])
-        assert text != "", "Document \"{}\" has no text".format(input_document_tuple[0])
+        text = input_document_object["content"]
+        assert type(text) is str, "Document \"{}\" does not have a string text".format(input_document_object["id"])
+        assert text != "", "Document \"{}\" has no text".format(input_document_object["id"])
 
         table = str.maketrans('', '', string.punctuation.replace('-', ''))
         no_punctuation = text.lower().translate(table)
@@ -90,10 +90,10 @@ class DefaultPreprocessor(BasePreprocessor):
                         nonstemmed[stemmed][term] += 1
 
         if len(stemmed_terms) >= self.minimum_terms_per_document:
-            output_article_tuple = *input_document_tuple[:1], " ".join(stemmed_terms), *input_document_tuple[2:]
-            return [output_article_tuple, json.dumps(nonstemmed)]
+            input_document_object["content"] = " ".join(stemmed_terms)
+            return input_document_object, nonstemmed
         else:
-            raise Exception("Too few terms for document \"{}\"".format(input_document_tuple[0]))
+            raise Exception("Too few terms for document \"{}\"".format(input_document_object["id"]))
 
 
 available_preprocessors = {

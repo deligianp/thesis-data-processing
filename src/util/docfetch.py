@@ -13,8 +13,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>
 """
-Author: Panagiotis Deligiannis
-
 A basic custom module that normalizes a docstring for CLI printing.
 
 The module offers a single function for normalizing a given docstring in order to restrict its width to fit to a CLI.
@@ -206,21 +204,26 @@ def _replace_tabs(lines_list, tabsize):
     return [line.replace("\t", " " * tabsize) for line in lines_list]
 
 
-def sanitize_docstring(docstring, tabsize=4, width=72):
+def sanitize_docstring(docstring, tabsize=4, width=72, normalize_indentation=True):
     """
     The function for sanitizing a docstring to a fixed width and with no tabs for indentation
 
     :param docstring: a docstring
     :param tabsize: amount of spaces that each tab, \"\t\", should be substituted with
     :param width: target number of characters for each line
+    :param normalize_indentation: if True, the common indentation whitespace from all lines is removed so that text is
+    shifted to the left
     :return: Returns a list of chunks that can be joined with a new line to obtain the original representation of the
     docstring
     """
-    lines = docstring.replace("\n", " \n").split("\n")
+    lines = docstring.split("\n")
     reduced_lines = _reduce_vertical_space(lines)
     no_tabs_lines = _replace_tabs(reduced_lines, tabsize)
-    normalized_lines = _normalize_identation(no_tabs_lines)
-    chunks = _text_chunks(normalized_lines)
+    if normalize_indentation:
+        normalized_lines = _normalize_identation(no_tabs_lines)
+        chunks = _text_chunks(normalized_lines)
+    else:
+        chunks = _text_chunks(no_tabs_lines)
     normalized_chunks = list()
     for chunk in chunks:
         normalized_chunks.append("\n".join(

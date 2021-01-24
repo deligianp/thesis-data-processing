@@ -49,19 +49,21 @@ import os
 import pickle
 
 from src.core.file import readers as corpus_readers
+from src.core.file import writers
 from src.core.train import preprocessors
 from src.util import docfetch
 from src.util import functions
 from src.util import parallel
 
 reporting_batch = 10000
+output_extensions = ("preprocessed", "nonstemmed")
 
-READERS_DICT = corpus_readers.available_readers
 PREPROCESSORS_DICT = preprocessors.available_preprocessors
 
 
-def preprocess_corpus(preprocessor_ref, reader_ref, output_dir_path, *input_file_paths, output_name=None,
-                      logger=None, workers=1, file_overwrite_confirmation_function=lambda path: True):
+def preprocess_corpus(preprocessor_ref, output_dir_path, *input_file_paths, output_name=None,
+                      logger=None, workers=1, max_file_objects=-1,
+                      file_overwrite_confirmation_function=lambda path: True):
     # If given logger is None then use a logger with a null handler
     if not logger:
         logger = logging.getLogger(__name__)
@@ -101,35 +103,6 @@ def preprocess_corpus(preprocessor_ref, reader_ref, output_dir_path, *input_file
         logger.debug("Argument preprocessor_ref successfully identified as a callable.")
         preprocessor_obj = preprocessor_ref
 
-    # If reader_ref is not a corpus_readers.BaseReader subclass, treat it as the lowercase name of a reader class,
-    # without the "Reader" ending
-    logger.debug("Attempting to infer reader from reader_ref argument.")
-    if not issubclass(type(reader_ref), corpus_readers.BaseReader):
-        logger.debug(
-            "Argument reader_ref was not a valid readers.BaseReader extension. Attempting to infer reader by"
-            "treating reader_ref as a readers.BaseReader extension class name.")
-        # Initialize reader
-        if reader_ref not in READERS_DICT:
-            logger.debug("Argument reader_ref was neither a readers.BaseReader extension instance nor a "
-                         "readers.BaseReader extension class name.")
-            logger.debug("Raising error.")
-            raise ValueError(
-                "Reader must be defined either in src.core.file.readers or in application.readers. Given reader '{}' "
-                "was not found".format(reader_ref)
-            )
-        else:
-            logger.debug(
-                "Argument reader_ref successfully identified as a readers.BaseReader extension class name.")
-            logger.debug("Attempting to get full absolute paths of defined input files' paths.")
-            input_file_paths = (os.path.abspath(os.path.expanduser(input_file_path)) for input_file_path in
-                                input_file_paths)
-            logger.debug(
-                "Initializing an object of the defined reader class, based on the produced input_file_paths.")
-            reader_obj = READERS_DICT[str(reader_ref)](*input_file_paths, logger=logger)
-    else:
-        logger.debug("Argument reader_ref successfully identified as readers.BaseReader extension instance.")
-        reader_obj = reader_ref
-
     # Get output directory path
     logger.debug("Attempting to get full absolute path of defined output directory's path.")
     output_dir_path = os.path.abspath(os.path.expanduser(output_dir_path))
@@ -150,7 +123,7 @@ def preprocess_corpus(preprocessor_ref, reader_ref, output_dir_path, *input_file
         logger.debug("Generating a name based on the current timestamp: {}.".format(
             datetime.datetime.strftime(current_timestamp, "%d-%m-%Y %H:%M:%S")
         ))
-        output_name = "preprocess_{}{}{}{}{}{}{}".format(
+        output_name = "preprocess_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             current_timestamp.year,
             current_timestamp.month,
             current_timestamp.day,
@@ -161,93 +134,97 @@ def preprocess_corpus(preprocessor_ref, reader_ref, output_dir_path, *input_file
         )
         logger.debug("Assigned name for output files: {}.".format(output_name))
 
-    # Add a .preprocessed extension for the file that will hold the preprocessed corpus and a .nonstemmed extension that
-    # will hold the term aliases before stemming. .ns is an intermediate file where nostemmed aliases are accumulated
-    # from all the workers
-    output_file_name = output_name + ".preprocessed"
-    logger.debug("Constructed preprocessed corpus output file name: {}.".format(output_file_name))
-    output_file_path = os.path.join(output_dir_path, output_file_name)
-    logger.debug("Preprocessed corpus output file will be saved in: {}.".format(output_file_path))
-    nonstemmed_file_name = "." + output_name + ".ns"
-    logger.debug("Constructed temporary nonstemmed terms output file name: {}.".format(nonstemmed_file_name))
-    nonstemmed_file_path = os.path.join(output_dir_path, nonstemmed_file_name)
-    logger.debug("Temporary nonstemmed terms file will be saved in: {}.".format(nonstemmed_file_path))
-    nonstemmed_file_name_combined = output_name + ".nonstemmed"
-    logger.debug("Constructed nonstemmed terms output file name: {}.".format(nonstemmed_file_name_combined))
-    nonstemmed_combined_file_path = os.path.join(output_dir_path, nonstemmed_file_name_combined)
-    logger.debug("Nonstemmed terms output file will be saved in: {}.".format(nonstemmed_combined_file_path))
+    output_name_template = output_name + ".part{}"
 
-    # Call the confirmation function for overwriting a file, if the output file already exists
-    logger.debug("Ensuring that no files, under the paths \"{}\" and already exist.".format(
-        "\", \"".join((output_file_path, nonstemmed_combined_file_path))
+    output_file_name_templates = [output_name_template + "." + extension for extension in output_extensions[:1]]
+    output_file_name_templates.append(output_name + "." + output_extensions[1])
+
+    logger.debug("Preprocessed corpus files' name pattern: {}.".format(output_name_template).format("[NUMBER]"))
+    logger.debug("Nonstemmed words map file pattern: {}".format(output_name + "." + output_extensions[1]))
+
+    logger.debug("Output files will be saved in: {}.".format(output_dir_path))
+
+    # Call the confirmation function for overwriting files, if similar files already exist
+    logger.debug("Checking whether files with the same naming patterns already exist in \"{}\"".format(
+        output_dir_path
     ))
-    logger.debug("In case any of the files exist, a confirmation for overwritting the file is required.")
-    if not file_overwrite_confirmation_function(output_file_path):
-        return
-    if not file_overwrite_confirmation_function(nonstemmed_file_path):
-        return
+    logger.debug("In case files exist, a confirmation for overwriting the files is required.")
+    for extension in output_extensions:
+        if not file_overwrite_confirmation_function(output_dir_path, (output_name, extension)):
+            return
+
+    reader_obj = corpus_readers.JSONReader(*input_file_paths, logger=logger)
 
     documents_loaded = 0
 
     # Initialize a multiprocessor that will execute preprocessing over the specified amount of processes
     logger.debug("Creating multiprocessor.")
-    multiprocessor = parallel.Multiprocessor(preprocessor_obj.perform_preprocess, workers, output_dir_path, output_file_name,
-                                             nonstemmed_file_name, logger=logger, buffer_size=10000)
+    multiprocessor = parallel.Multiprocessor(preprocessor_obj.perform_preprocess, workers, output_dir_path,
+                                             output_name, output_extensions[0], "nstemmed", logger=logger,
+                                             buffer_size=10000,
+                                             max_objects_per_output_file=max_file_objects)
     logger.debug("Initiating workers. Workers on stand-by.")
     multiprocessor.start()
     for record in reader_obj:
         multiprocessor.feed(record)
         documents_loaded += 1
         if documents_loaded % reporting_batch == 0:
-            logger.info("Attempted to preprocess {} documents".format(documents_loaded))
-    logger.info("Attempted to preprocess {} documents".format(documents_loaded))
+            logger.info("{} documents passed to preprocessor".format(documents_loaded))
+    logger.info("{} documents passed to preprocessor".format(documents_loaded))
     number_of_items_processed = multiprocessor.close()
 
     logger.info("Successfully preprocessed {} documents out of {} totally provided".format(number_of_items_processed[0],
                                                                                            documents_loaded))
-    logger.info("Preprocessed corpus was saved in \"{}\"".format(output_file_path))
-    if len(number_of_items_processed) > 1 and number_of_items_processed[1] != 0:
-        nonstemmed_fh = bz2.BZ2File(nonstemmed_file_path, "rb")
-        nonstemmed_unpickler = pickle.Unpickler(nonstemmed_fh)
+    files_to_fetch_for_sample = 3
+    preprocessed_files_sample = multiprocessor.joined_files_writers[0].created_files[:files_to_fetch_for_sample - 1]
+    if len(multiprocessor.joined_files_writers[0].created_files) >= files_to_fetch_for_sample:
+        if len(multiprocessor.joined_files_writers[0].created_files) > files_to_fetch_for_sample:
+            preprocessed_files_sample.append("...")
+        preprocessed_files_sample.append(multiprocessor.joined_files_writers[0].created_files[-1])
 
-        combined_dictionary = dict()
-        while True:
-            try:
-                document_nonstemmed = json.loads(nonstemmed_unpickler.load())
-            except EOFError:
-                break
+    logger.info("Preprocessed corpus was saved in:\n\t\"{}\"".format("\"\n\t\"".join(
+        (os.path.join(output_dir_path, file_name) for file_name in preprocessed_files_sample)
+    )))
 
-            for stemmed_key in document_nonstemmed:
-                if stemmed_key not in combined_dictionary:
-                    combined_dictionary[stemmed_key] = dict()
-                for nonstemmed in document_nonstemmed[stemmed_key]:
-                    if nonstemmed in combined_dictionary[stemmed_key]:
-                        combined_dictionary[stemmed_key][nonstemmed] += 1
-                    else:
-                        combined_dictionary[stemmed_key][nonstemmed] = 1
+    accumulated_non_stemmmed_mappings = dict()
+    nstemmed_files_reader = corpus_readers.JSONReader(*multiprocessor.joined_files_writers[1].created_files)
+    for stemmed_mappings in nstemmed_files_reader:
+        for stemmed_term in stemmed_mappings:
+            if stemmed_term not in accumulated_non_stemmmed_mappings:
+                accumulated_non_stemmmed_mappings[stemmed_term] = dict()
+            for nonstemmed_term in stemmed_mappings[stemmed_term]:
+                if nonstemmed_term in accumulated_non_stemmmed_mappings[stemmed_term]:
+                    accumulated_non_stemmmed_mappings[stemmed_term][nonstemmed_term] += stemmed_mappings[stemmed_term][
+                        nonstemmed_term]
+                else:
+                    accumulated_non_stemmmed_mappings[stemmed_term][nonstemmed_term] = stemmed_mappings[stemmed_term][
+                        nonstemmed_term]
 
-        nonstemmed_fh.close()
-        nonstemmed_combined_fh = bz2.BZ2File(nonstemmed_combined_file_path, "wb")
-        nonstemmed_pickler = pickle.Pickler(nonstemmed_combined_fh, protocol=pickle.HIGHEST_PROTOCOL)
-        nonstemmed_pickler.dump(combined_dictionary)
-        nonstemmed_combined_fh.close()
-        os.remove(nonstemmed_file_path)
-        logger.info("Mapped nonstemmed term aliases for {} documents to file \"{}\"".format(
-            number_of_items_processed[1],
-            nonstemmed_combined_file_path
-        ))
+    nonstemmed_term_writer = writers.JSONWriter(output_name, output_directory=output_dir_path,
+                                                output_files_extension="nonstemmed", max_file_objects_amount=-1)
+    for stemmed_term in accumulated_non_stemmmed_mappings:
+        words_statistics = accumulated_non_stemmmed_mappings[stemmed_term]
+        nonstemmed_mapping_object = {
+            "stemmed": stemmed_term,
+            "original_word_statistics": tuple(sorted([
+                (word, words_statistics[word]) for word in words_statistics
+            ], key=lambda x: x[1], reverse=True))
+        }
+        nonstemmed_term_writer.write_object(nonstemmed_mapping_object)
+    nonstemmed_term_writer.close()
+    logger.info("Non-stemmed statistics map was saved in \"{}\".".format(os.path.join(
+        output_dir_path, output_file_name_templates[1]
+    )))
+
+    for file in multiprocessor.joined_files_writers[1].created_files:
+        os.remove(file)
 
 
 if __name__ == "__main__":
 
     argument_parser = argparse.ArgumentParser(description="\n".join(docfetch.sanitize_docstring(__doc__)))
-    argument_parser.add_argument("reader", choices=tuple(READERS_DICT.keys()),
-                                 help="An available dataset reader that should handle the dataset of each "
-                                      "case. For more information regarding the available readers you can "
-                                      "use the argument \"python info.py list-readers\". If the target corpus has been "
-                                      "passed from one or more filtering steps, \"bz2bag\" reader should be used.")
-    argument_parser.add_argument("input_file_paths", nargs="+", help="One or more path(s) to the corpus files or "
-                                                                     "configuration files for each reader")
+    argument_parser.add_argument("input_file_paths", nargs="+", help="One or more path(s) to .corpus or .filtered "
+                                                                     "files")
     argument_parser.add_argument("output_dir_path", help="Path to a directory where the preprocessed dataset will be "
                                                          "saved")
     argument_parser.add_argument("-o", "--output-name", help="Name to be associated with the output files. If omitted "
@@ -276,17 +253,22 @@ if __name__ == "__main__":
                                  help="The preprocessor which will be for the given corpus. If not the script will use "
                                       "a default preprocessor defined in src.core.train.preprocessors. For more "
                                       "information about preprocessors use \"python info.py list-preprocessors\".")
+    argument_parser.add_argument("-m", "--max-file-objects", type=int, default=-1,
+                                 help="It controls the maximum amount of objects writen into a JSON output file. Any "
+                                      "negative value or 0 means that the script will save all of the output in a "
+                                      "single file. However this is discouraged for large datasets since certain file "
+                                      "systems have limitations on the maximum size of a file")
 
     args_namespace = argument_parser.parse_args()
     functions.cli_print_license()
 
-    reader_ref = args_namespace.reader
+    max_file_objects = args_namespace.max_file_objects
     output_dir_path = args_namespace.output_dir_path
     input_file_paths = args_namespace.input_file_paths
     output_name = args_namespace.output_name
     if not output_name:
         current_timestamp = datetime.datetime.today()
-        output_name = "preprocess_{}{}{}{}{}{}{}".format(
+        output_name = "preprocess_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             current_timestamp.year,
             current_timestamp.month,
             current_timestamp.day,
@@ -304,9 +286,9 @@ if __name__ == "__main__":
     preprocessor_ref = args_namespace.preprocessor
 
     try:
-        preprocess_corpus(preprocessor_ref, reader_ref, output_dir_path, *input_file_paths, output_name=output_name,
-                          logger=logger, workers=workers,
-                          file_overwrite_confirmation_function=file_overwrite_confirmation_function)
+        preprocess_corpus(preprocessor_ref, output_dir_path, *input_file_paths, output_name=output_name,
+                          logger=logger, workers=workers, max_file_objects=max_file_objects,
+                          file_overwrite_confirmation_function=functions.confirm_batch_file_write)
     except Exception as ex:
         logger.critical(str(ex))
         exit(0)

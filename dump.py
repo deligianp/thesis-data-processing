@@ -14,19 +14,20 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>
 import argparse
 import datetime
-import json
 import logging
 import os
 
 import numpy as np
 from gensim.models import LdaModel
 
-from src.core.file import readers
+from src.core.file import readers, writers
 from src.util import functions
 
+output_extensions = ("json",)
 
-def dump_corpus_topics(model_ref, output_dir_path, *vectorized_ref, output_name=None, logger=None, top_n=10,
-                       file_overwrite_confirmation_function=lambda path: True):
+
+def dump_corpus_topics(model_path, output_dir_path, *vectorized_paths, output_name=None, logger=None, top_n=10,
+                       file_overwrite_confirmation_function=lambda path: True, max_file_objects=-1):
     if not logger:
         logger = logging.getLogger(__name__)
         logger.addHandler(logging.NullHandler())
@@ -36,7 +37,7 @@ def dump_corpus_topics(model_ref, output_dir_path, *vectorized_ref, output_name=
 
     if not output_name:
         current_timestamp = datetime.datetime.today()
-        output_name = "corpus_topics_{}{}{}{}{}{}{}".format(
+        output_name = "corpus_topics_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             current_timestamp.year,
             current_timestamp.month,
             current_timestamp.day,
@@ -45,39 +46,60 @@ def dump_corpus_topics(model_ref, output_dir_path, *vectorized_ref, output_name=
             current_timestamp.second,
             int(current_timestamp.microsecond / 1000)
         )
-    output_file_name = output_name + ".json"
-    output_file_path = os.path.join(output_dir_path, output_file_name)
+    output_name_template = output_name + ".part{}"
 
-    if not file_overwrite_confirmation_function(output_file_path):
-        exit(0)
+    output_file_name_templates = [output_name_template + "." + extension for extension in output_extensions]
 
-    if not issubclass(type(vectorized_ref), readers.Bz2BagReader):
-        vectorized_ref = readers.Bz2BagReader(*vectorized_ref)
+    logger.debug("Corpus topics files' name pattern: {}.".format(output_name_template).format("[NUMBER]"))
 
-    if not hasattr(model_ref, "get_document_topics"):
-        model_path = os.path.abspath(os.path.expanduser(model_ref))
-        model_ref = LdaModel.load(model_path)
+    logger.debug("Output files will be saved in: {}.".format(output_dir_path))
 
-    dump_list = [
-        {
-            "document_identifier": doc[0],
-            "top_topics": [
-                {
-                    "topic_index": topic[0],
-                    "probability": float(topic[1])
-                } for topic in
-                sorted(model_ref.get_document_topics(doc[1], minimum_probability=0.0), key=lambda val: val[1],
-                       reverse=True)[:top_n]
-            ]
-        } for doc in vectorized_ref
-    ]
+    # Call the confirmation function for overwriting files, if similar files already exist
+    logger.debug("Checking whether files with the same naming patterns already exist in \"{}\"".format(
+        output_dir_path
+    ))
+    logger.debug("In case files exist, a confirmation for overwriting the files is required.")
+    for extension in output_extensions:
+        if not file_overwrite_confirmation_function(output_dir_path, (output_name, extension)):
+            return
 
-    with open(output_file_path, "w", encoding="utf-8") as f_handle:
-        json.dump(dump_list, f_handle, indent=4)
+    reader = readers.JSONReader(*vectorized_paths)
+
+    model_path = os.path.abspath(os.path.expanduser(model_path))
+    model_ref = LdaModel.load(model_path)
+
+    with writers.JSONWriter(output_name, output_directory=output_dir_path, max_file_objects_amount=max_file_objects,
+                            output_files_extension=output_extensions[0]) as writer:
+        for doc in reader:
+            corpus_topics_obj = {
+                "document_identifier": doc["id"],
+                "top_topics": [
+                    {
+                        "topic_index": topic[0],
+                        "probability": float(topic[1])
+                    } for topic in
+                    sorted(model_ref.get_document_topics(doc["content"], minimum_probability=0.0),
+                           key=lambda val: val[1],
+                           reverse=True)[:top_n]
+                ]
+            }
+            writer.write_object(corpus_topics_obj)
+        writer.close()
+
+    files_to_fetch_for_sample = 3
+    corpus_topics_files_sample = writer.created_files[:files_to_fetch_for_sample - 1]
+    if len(writer.created_files) >= files_to_fetch_for_sample:
+        if len(writer.created_files) > files_to_fetch_for_sample:
+            corpus_topics_files_sample.append("...")
+        corpus_topics_files_sample.append(writer.created_files[-1])
+
+    logger.info("Corpus topics were saved in:\n\t\"{}\"".format("\"\n\t\"".join(
+        (os.path.join(output_dir_path, file_name) for file_name in corpus_topics_files_sample)
+    )))
 
 
-def dump_model(model_ref, output_dir_path, output_name=None, logger=None, top_n=10,
-               file_overwrite_confirmation_function=lambda path: True):
+def dump_model(model_path, output_dir_path, output_name=None, logger=None, top_n=10,
+               file_overwrite_confirmation_function=lambda path: True, max_file_objects=-1):
     if not logger:
         logger = logging.getLogger(__name__)
         logger.addHandler(logging.NullHandler())
@@ -87,7 +109,7 @@ def dump_model(model_ref, output_dir_path, output_name=None, logger=None, top_n=
 
     if not output_name:
         current_timestamp = datetime.datetime.today()
-        output_name = "topic_terms_{}{}{}{}{}{}{}".format(
+        output_name = "topic_terms_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             current_timestamp.year,
             current_timestamp.month,
             current_timestamp.day,
@@ -96,33 +118,53 @@ def dump_model(model_ref, output_dir_path, output_name=None, logger=None, top_n=
             current_timestamp.second,
             int(current_timestamp.microsecond / 1000)
         )
-    output_file_name = output_name + ".json"
-    output_file_path = os.path.join(output_dir_path, output_file_name)
+    output_name_template = output_name + ".part{}"
 
-    if not file_overwrite_confirmation_function(output_file_path):
-        exit(0)
+    output_file_name_templates = [output_name_template + "." + extension for extension in output_extensions]
 
-    if hasattr(model_ref, "get_topics"):
-        topic_terms_matrix = model_ref.get_topics()
-    else:
-        model_path = os.path.abspath(os.path.expanduser(model_ref))
-        model_ref = LdaModel.load(model_path)
-        topic_terms_matrix = LdaModel.load(model_path).get_topics()
+    logger.debug("Topics files' name pattern: {}.".format(output_name_template).format("[NUMBER]"))
+
+    logger.debug("Output files will be saved in: {}.".format(output_dir_path))
+
+    # Call the confirmation function for overwriting files, if similar files already exist
+    logger.debug("Checking whether files with the same naming patterns already exist in \"{}\"".format(
+        output_dir_path
+    ))
+    logger.debug("In case files exist, a confirmation for overwriting the files is required.")
+    for extension in output_extensions:
+        if not file_overwrite_confirmation_function(output_dir_path, (output_name, extension)):
+            return
+
+    model_path = os.path.abspath(os.path.expanduser(model_path))
+    model_ref = LdaModel.load(model_path)
+    topic_terms_matrix = model_ref.get_topics()
     top_n_topic_terms_matrix = np.flip(np.argsort(topic_terms_matrix, axis=1), axis=1)[:, :top_n]
-    dump_list = [
-        {
-            "topic_index": i,
-            "top_terms": [
-                {
-                    "term": model_ref.id2word[j],
-                    "probability": float(topic_terms_matrix[i, j])
-                } for j in top_n_topic_terms_matrix[i]
-            ]
-        } for i in range(len(top_n_topic_terms_matrix))
-    ]
 
-    with open(output_file_path, "w", encoding="utf-8") as f_handle:
-        json.dump(dump_list, f_handle, indent=4)
+    with writers.JSONWriter(output_name, output_directory=output_dir_path, max_file_objects_amount=max_file_objects,
+                            output_files_extension=output_extensions[0]) as writer:
+        for i in range(len(top_n_topic_terms_matrix)):
+            topic_object = {
+                "topic_index": i,
+                "top_terms": [
+                    {
+                        "term": model_ref.id2word[j],
+                        "probability": float(topic_terms_matrix[i, j])
+                    } for j in top_n_topic_terms_matrix[i]
+                ]
+            }
+            writer.write_object(topic_object)
+        writer.close()
+
+        files_to_fetch_for_sample = 3
+        topics_files_sample = writer.created_files[:files_to_fetch_for_sample - 1]
+        if len(writer.created_files) >= files_to_fetch_for_sample:
+            if len(writer.created_files) > files_to_fetch_for_sample:
+                topics_files_sample.append("...")
+            topics_files_sample.append(writer.created_files[-1])
+
+        logger.info("Topics were saved in:\n\t\"{}\"".format("\"\n\t\"".join(
+            (os.path.join(output_dir_path, file_name) for file_name in topics_files_sample)
+        )))
 
 
 if __name__ == "__main__":
@@ -153,6 +195,11 @@ if __name__ == "__main__":
                                       "located in the \"logs\" directory specified above with the name "
                                       "\"debug_[output_name]\", where output_name refers to the given or inferred "
                                       "output name. Default: 1")
+    argument_parser.add_argument("-m", "--max-file-objects", type=int, default=-1,
+                                 help="It controls the maximum amount of objects writen into a JSON output file. Any "
+                                      "negative value or 0 means that the script will save all of the output in a "
+                                      "single file. However this is discouraged for large datasets since certain file "
+                                      "systems have limitations on the maximum size of a file")
     argument_parser.add_argument("-n", "--top-n", help="This number restricts the amount of records written to the "
                                                        "dumped files. ", default=10, type=int)
     args_namespace = argument_parser.parse_args()
@@ -168,7 +215,7 @@ if __name__ == "__main__":
     output_name = args_namespace.output_name
     if not output_name:
         current_timestamp = datetime.datetime.today()
-        output_name = "{}_{}{}{}{}{}{}{}".format(
+        output_name = "{}_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             "corpus_topics" if dump_corpus else "topic_terms",
             current_timestamp.year,
             current_timestamp.month,
@@ -179,11 +226,14 @@ if __name__ == "__main__":
             int(current_timestamp.microsecond / 1000)
         )
     logger = functions.construct_logger(__name__, output_dir_path, output_name, args_namespace.log_level)
-    file_overwrite_confirmation_function = functions.confirm_file_write
+    file_overwrite_confirmation_function = functions.confirm_batch_file_write
+    max_file_objects = args_namespace.max_file_objects
     top_n = args_namespace.top_n
     if vectorized_paths:
         dump_corpus_topics(input_model_path, output_dir_path, *vectorized_paths, output_name=output_name, logger=logger,
-                           top_n=top_n, file_overwrite_confirmation_function=functions.confirm_file_write)
+                           top_n=top_n, file_overwrite_confirmation_function=file_overwrite_confirmation_function,
+                           max_file_objects=max_file_objects)
     else:
         dump_model(input_model_path, output_dir_path, output_name=output_name, logger=logger, top_n=top_n,
-                   file_overwrite_confirmation_function=functions.confirm_file_write)
+                   file_overwrite_confirmation_function=file_overwrite_confirmation_function,
+                   max_file_objects=max_file_objects)

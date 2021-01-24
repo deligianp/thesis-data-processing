@@ -17,10 +17,12 @@ import inspect
 import logging
 import math
 import sys
+import argparse
 from abc import ABCMeta, abstractmethod
 
 import langdetect
 import nltk
+import json
 
 
 class BaseFilter(metaclass=ABCMeta):
@@ -33,9 +35,9 @@ class BaseFilter(metaclass=ABCMeta):
 class LanguageFilter(BaseFilter):
     """
     It creates a language filter based on the given language argument.
-    
-    The proper format for defining a language is "language [LANGUAGE] [*ITERATIONS]" where LANGUAGE is one of the
-    following:
+
+    The proper format for defining a language is "language [LANGUAGE] [*ITERATIONS] [APPEND]" where LANGUAGE is one of
+    the following:
         * da
         * de
         * el
@@ -53,16 +55,32 @@ class LanguageFilter(BaseFilter):
     used to compensate for the indeterministic nature of the language estimating method. A document is accepted if its
     text is classified as the defined language in all of the ITERATIONS. ITERATIONS argument is optional; if omitted the
     estimation will only run once per text.
+
+    If as a final argument, "append" is given, then estimated language will be inserted in the "metadata" dictionary, of
+    the related document, mapped to the key "language".
+
+    NOTE! The filter definition along with any arguments must be enclosed in double quotes (") and delimited by a SPACE.
     """
     implemented_languages = {"da", "de", "el", "en", "es", "fi", "fr", "nl", "no", "pt", "ru", "sv"}
 
     def __init__(self, *args, **kwargs):
         super(LanguageFilter, self).__init__()
         self.language = args[0]
-        try:
+        if len(args) == 3:
             self.iterations = int(args[1])
-        except IndexError:
-            self.iterations = 1
+            assert self.iterations > 1, "Number of iterations for language estimation must be at least 1"
+
+            assert args[2] == "append", "Unknown argument for filter construction: {}".format(args[2])
+            self.append = True
+        elif len(args) == 2:
+            if args[1] == "append":
+                self.append = True
+                self.iterations = 1
+            else:
+                self.append = False
+                self.iterations = int(args[1])
+                assert self.iterations > 1, "Number of iterations for language estimation must be at least 1"
+
         assert self.language in self.implemented_languages, "Unknown language defined. Supported languages: " + \
                                                             ", ".join(self.implemented_languages)
         # logger = kwargs.get("worker_logger", None)
@@ -71,21 +89,31 @@ class LanguageFilter(BaseFilter):
         #     logger.addHandler(logging.NullHandler())
         # self.logger = logger
 
-    def perform_filter(self, input_document_tuple, **kwargs):
+    def perform_filter(self, input_document_object, **kwargs):
         if "worker_logger" in kwargs:
             if "worker_id" in kwargs:
-                kwargs["worker_logger"].debug("{}: Got article {}".format(kwargs["worker_id"], input_document_tuple[0]))
+                kwargs["worker_logger"].debug(
+                    "{}: Got article {}".format(kwargs["worker_id"], input_document_object["id"]))
             else:
-                kwargs["worker_logger"].debug("Got article {}".format(input_document_tuple[0]))
+                kwargs["worker_logger"].debug("Got article {}".format(input_document_object["id"]))
         try:
             language_estimation_iterations = self.iterations
             while True:
-                estimated_lang = langdetect.detect(input_document_tuple[1])
+                estimated_lang = langdetect.detect(input_document_object["content"])
                 language_estimation_iterations -= 1
                 assert estimated_lang == self.language, "Document \"{}\" failed to classify as a text in language " \
-                                                        "\"{}\"".format(input_document_tuple[0], self.language)
+                                                        "\"{}\"".format(input_document_object[0], self.language)
                 if language_estimation_iterations == 0:
-                    return [input_document_tuple]
+                    if self.append:
+                        if "metadata" in input_document_object:
+                            input_document_object["metadata"]["language"] = self.language
+                        else:
+                            input_document_object["metadata"] = {"language": self.language}
+                        # input_document_object = (
+                        #     input_document_object[0], input_document_object[1], metadata_dictionary_json
+                        # )
+
+                    return [input_document_object]
         except Exception:
             pass
         return None

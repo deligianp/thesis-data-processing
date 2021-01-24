@@ -15,22 +15,16 @@
 """"""
 
 import argparse
-import bz2
-import concurrent.futures
 import datetime
 import logging
 import logging.handlers
-import multiprocessing as mp
 import os
-import pickle
 
 import numpy as np
 from gensim import models
 
 from src.core.evaluate import metrics
 from src.util import functions
-from src.util import parallel
-from src.core.file import readers
 
 
 # This function is designed to run as the root function of each new process
@@ -45,9 +39,19 @@ def _execute_metric_calculation(arguments_dictionary, **kwargs):
     temporary_dictionary_0_path = arguments_dictionary["m0_dictionary_path"]
     temporary_dictionary_1_path = arguments_dictionary["m1_dictionary_path"]
     topn = arguments_dictionary["topn"]
+    output_dir_path = arguments_dictionary["output_dir_path"]
     metric_result = metric_function(topic_terms_0_path, temporary_dictionary_0_path, topic_terms_1_path,
                                     temporary_dictionary_1_path, topn=topn, logger=logger)
-    return [metric_result]
+
+    worker_id = kwargs["worker_id"]
+    result_file_name = os.path.join(output_dir_path, f".{worker_id}-result")
+    np.save(result_file_name, metric_result)
+
+    return [
+        {
+            "path": result_file_name
+        }
+    ]
 
 
 def _divide_to_jobs(array, workers):
@@ -67,24 +71,11 @@ def _divide_to_jobs(array, workers):
         return [array]
 
 
-# def _load_model_from_path(path):
-#     path = os.path.abspath(path)
-#     try:
-#         model0 = models.LdaModel.load(path)
-#         return model0
-#     except (FileNotFoundError, PermissionError, IsADirectoryError) as fse:
-#         raise ValueError("{}: {}".format(path, fse.strerror))
-#     except pickle.UnpicklingError as upe:
-#         raise ValueError(
-#             "{}: Not a valid LDA file. File needs to be exported by gensim model class's save() method.".format(
-#                 path))
-
-
 def compare_models(metric_ref, model0, model1, output_dir_path, output_name=None, logger=None, workers=1, topn=50,
                    model0_bounds=None, model1_bounds=None, file_overwrite_confirmation_function=lambda path: True):
     if not logger:
         logger = logging.getLogger(__name__)
-        logger.addHandler(logging.NullHandler)
+        logger.addHandler(logging.NullHandler())
 
     logger.debug("Checking that number of workers is a valid natural number.")
     logger.debug("Checking if number of workers is at least 1.")
@@ -156,7 +147,7 @@ def compare_models(metric_ref, model0, model1, output_dir_path, output_name=None
         logger.debug("Generating a name based on the current timestamp: {}.".format(
             datetime.datetime.strftime(current_timestamp, "%d-%m-%Y %H:%M:%S")
         ))
-        output_name = "{}_{}{}{}{}{}{}{}".format(
+        output_name = "{}_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             metric_name,
             current_timestamp.year,
             current_timestamp.month,
@@ -200,8 +191,10 @@ def compare_models(metric_ref, model0, model1, output_dir_path, output_name=None
     logger.debug("Fetching models' dictionaries")
     temporary_dictionary_0_name = ".0.{}.dictionary".format(output_name)
     temporary_dictionary_0_path = os.path.join(output_dir_path, temporary_dictionary_0_name)
+    model0_dictionary.save(temporary_dictionary_0_path)
     temporary_dictionary_1_name = ".1.{}.dictionary".format(output_name)
     temporary_dictionary_1_path = os.path.join(output_dir_path, temporary_dictionary_1_name)
+    model1_dictionary.save(temporary_dictionary_1_path)
 
     if model0_bounds:
         logger.debug("Reducing first model's topics. Initial shape: {}".format(model0_topics.shape))
@@ -216,92 +209,108 @@ def compare_models(metric_ref, model0, model1, output_dir_path, output_name=None
     del model0
     del model1
 
-    # Create jobs if multiple workers were given
-    logger.debug("Dividing calculation task to {} workers".format(workers))
-    distributed_jobs = _divide_to_jobs(model0_topics, workers)
-    logger.debug("Number of tasks for each worker: {}".format([len(worker_job) for worker_job in distributed_jobs]))
+    m0_path = os.path.join(output_dir_path, "m0_matrix.npy")
+    np.save(m0_path, model0_topics)
+    m1_path = os.path.join(output_dir_path, "m1_matrix.npy")
+    np.save(m1_path, model1_topics)
 
-    logger.debug("Generating temporary files paths to store first model's split matrix")
-    subarray_file_names = [".0_{}_{}.npy".format(i, output_name) for i in
-                           range(len(distributed_jobs))]
-    subarray_file_paths = [os.path.join(output_dir_path, subarray_file_name) for subarray_file_name in
-                           subarray_file_names]
-    # subarray_paths = [os.path.join(output_directory_path, ".{}_{}.npy".format(i, os.path.basename(output_file_path)))
-    #                   for i in range(len(distributed_jobs))]
-    logger.debug("Temporary files for first model's split matrix: " + ", ".join(subarray_file_paths))
-    logger.debug("Generating temporary file path for second model's matrix")
-    m1_array_file_name = ".1_0_{}.npy".format(output_name)
-    m1_array_file_path = os.path.join(output_dir_path, m1_array_file_name)
-    logger.debug("Temporary file for second model's matrix: " + m1_array_file_path)
+    m = metric(m0_path, temporary_dictionary_0_path, m1_path, temporary_dictionary_1_path, topn=top_n, logger=logger)
 
-    logger.debug("Preparing distributed tasks for calculation")
-    for i in range(len(distributed_jobs)):
-        np.save(subarray_file_paths[i], distributed_jobs[i])
-    np.save(m1_array_file_path, model1_topics)
-
-    logger.debug("Saving dictionary for first model")
-    model0_dictionary.save(temporary_dictionary_0_path)
-    logger.debug("Saving dictionary for second model")
-    model1_dictionary.save(temporary_dictionary_1_path)
-
-    logger.debug("Dereferencing split matrices of first model")
-    for i in range(len(distributed_jobs), 0, -1):
-        del distributed_jobs[i - 1]
-    logger.debug("Dereferencing matrix of first model")
-    del model0_topics
-    logger.debug("Dereferencing matrix of secondary model")
-    del model1_topics
-
-    logger.debug("Dereferencing first model's dictionary")
-    del model0_dictionary
-    logger.debug("Dereferencing second model's dictionary")
-    del model1_dictionary
-
-    logger.debug("Creating subprocess arguments")
-    execution_arguments = [
-        {
-            "target_metric": metric,
-            "m0_array_path": subarray_path,
-            "m1_array_path": m1_array_file_path,
-            "m0_dictionary_path": temporary_dictionary_0_path,
-            "m1_dictionary_path": temporary_dictionary_1_path,
-            "topn": top_n
-        } for subarray_path in subarray_file_paths
-    ]
-
-    logger.debug("Creating multiprocessor.")
-    multiprocessor = parallel.Multiprocessor(_execute_metric_calculation, workers, output_dir_path,
-                                             temporary_workers_result_output_file, logger=logger, buffer_size=10000)
-    logger.debug("Initiating workers. Workers on stand-by.")
-    multiprocessor.start()
-    for args_dict in execution_arguments:
-        multiprocessor.feed(args_dict)
-    number_of_items_processed = multiprocessor.close()
-
-    results = readers.Bz2BagReader(temporary_workers_result_output_path)
-
-    logger.debug("Joining results")
-    total_result = None
-    for result in results:
-        if total_result is not None:
-            total_result = np.concatenate((total_result, result), axis=0)
-        else:
-            total_result = result
-
-    logger.debug("Retrieved a total matrix of shape: {}".format(total_result.shape))
-
-    logger.debug("Deleting temporary files")
-    for temp_file_path in subarray_file_paths:
-        os.remove(temp_file_path)
-    os.remove(m1_array_file_path)
-    os.remove(temporary_dictionary_0_path)
-    os.remove(temporary_dictionary_1_path)
-    os.remove(temporary_workers_result_output_path)
-
-    logger.info("Result of calculation was saved in \"{}\"".format(output_file_path))
-    with bz2.BZ2File(output_file_path, "wb") as fhandle:
-        pickler = pickle.Pickler(fhandle, protocol=pickle.HIGHEST_PROTOCOL)
-        pickler.dump(total_result)
+    np.save(output_file_path, m)
+    # # Create jobs if multiple workers were given
+    # logger.debug("Dividing calculation task to {} workers".format(workers))
+    # distributed_jobs = _divide_to_jobs(model0_topics, workers)
+    # logger.debug("Number of tasks for each worker: {}".format([len(worker_job) for worker_job in distributed_jobs]))
+    #
+    # logger.debug("Generating temporary files paths to store first model's split matrix")
+    # subarray_file_names = [".0_{}_{}.npy".format(i, output_name) for i in
+    #                        range(len(distributed_jobs))]
+    # subarray_file_paths = [os.path.join(output_dir_path, subarray_file_name) for subarray_file_name in
+    #                        subarray_file_names]
+    # # subarray_paths = [os.path.join(output_directory_path, ".{}_{}.npy".format(i, os.path.basename(output_file_path)))
+    # #                   for i in range(len(distributed_jobs))]
+    # logger.debug("Temporary files for first model's split matrix: " + ", ".join(subarray_file_paths))
+    # logger.debug("Generating temporary file path for second model's matrix")
+    # m1_array_file_name = ".1_0_{}.npy".format(output_name)
+    # m1_array_file_path = os.path.join(output_dir_path, m1_array_file_name)
+    # logger.debug("Temporary file for second model's matrix: " + m1_array_file_path)
+    #
+    # logger.debug("Preparing distributed tasks for calculation")
+    # for i in range(len(distributed_jobs)):
+    #     np.save(subarray_file_paths[i], distributed_jobs[i])
+    # np.save(m1_array_file_path, model1_topics)
+    #
+    # logger.debug("Saving dictionary for first model")
+    # model0_dictionary.save(temporary_dictionary_0_path)
+    # logger.debug("Saving dictionary for second model")
+    # model1_dictionary.save(temporary_dictionary_1_path)
+    #
+    # logger.debug("Dereferencing split matrices of first model")
+    # for i in range(len(distributed_jobs), 0, -1):
+    #     del distributed_jobs[i - 1]
+    # logger.debug("Dereferencing matrix of first model")
+    # del model0_topics
+    # logger.debug("Dereferencing matrix of secondary model")
+    # del model1_topics
+    #
+    # logger.debug("Dereferencing first model's dictionary")
+    # del model0_dictionary
+    # logger.debug("Dereferencing second model's dictionary")
+    # del model1_dictionary
+    #
+    # logger.debug("Creating subprocess arguments")
+    # execution_arguments = [
+    #     {
+    #         "target_metric": metric,
+    #         "m0_array_path": subarray_path,
+    #         "m1_array_path": m1_array_file_path,
+    #         "m0_dictionary_path": temporary_dictionary_0_path,
+    #         "m1_dictionary_path": temporary_dictionary_1_path,
+    #         "topn": top_n,
+    #         "output_dir_path": output_dir_path
+    #     } for subarray_path in subarray_file_paths
+    # ]
+    #
+    # logger.debug("Creating multiprocessor.")
+    # multiprocessor = parallel.Multiprocessor(_execute_metric_calculation, workers, output_dir_path,
+    #                                          output_name, "comp", logger=logger, buffer_size=10000)
+    # logger.debug("Initiating workers. Workers on stand-by.")
+    # multiprocessor.start()
+    # for args_dict in execution_arguments:
+    #     multiprocessor.feed(args_dict)
+    # number_of_items_processed = multiprocessor.close()
+    #
+    # file_paths_reader = readers.JSONReader(*multiprocessor.joined_files_writers[0].created_files)
+    # paths = list()
+    # for path_obj in file_paths_reader:
+    #     paths.append(path_obj["path"])
+    # file_paths_reader.close()
+    #
+    # np_subbarrays = list()
+    # for path in paths:
+    #     np_subbarrays(np.load(path))
+    # logger.debug("Joining results")
+    # total_result = None
+    # for result in results:
+    #     if total_result is not None:
+    #         total_result = np.concatenate((total_result, result), axis=0)
+    #     else:
+    #         total_result = result
+    #
+    # logger.debug("Retrieved a total matrix of shape: {}".format(total_result.shape))
+    #
+    # logger.debug("Deleting temporary files")
+    # for temp_file_path in subarray_file_paths:
+    #     os.remove(temp_file_path)
+    # os.remove(m1_array_file_path)
+    # os.remove(temporary_dictionary_0_path)
+    # os.remove(temporary_dictionary_1_path)
+    # os.remove(temporary_workers_result_output_path)
+    #
+    # logger.info("Result of calculation was saved in \"{}\"".format(output_file_path))
+    # with bz2.BZ2File(output_file_path, "wb") as fhandle:
+    #     pickler = pickle.Pickler(fhandle, protocol=pickle.HIGHEST_PROTOCOL)
+    #     pickler.dump(total_result)
 
 
 if __name__ == "__main__":
@@ -343,7 +352,7 @@ if __name__ == "__main__":
 
     argument_parser.add_argument("-N", help="Value of the top N terms to be considered for each topic. Used only by a "
                                             "subset of metrics that take into account only the top-N terms of each "
-                                            "topic (see above). Default: 50.", type=int, default=50)
+                                            "topic (see above). Default: 1.", type=int, default=1)
     argument_parser.add_argument("-m0", "--model0-bounds", nargs=2, type=int,
                                  help="Correct syntax: -m0 [STARTING_TOPIC_INDEX] [TOPICS_TO_COMPARE]. It allows to "
                                       "define a subset of topics of model 0 which will be compared. The first argument "
@@ -367,7 +376,7 @@ if __name__ == "__main__":
     output_name = args_namespace.output_name
     if not output_name:
         current_timestamp = datetime.datetime.today()
-        output_name = "{}_{}{}{}{}{}{}{}".format(
+        output_name = "{}_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             target_metric,
             current_timestamp.year,
             current_timestamp.month,

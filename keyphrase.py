@@ -41,10 +41,6 @@ The module, as it serves only as a utility functionality it makes several assump
     3. The module strongly assumes that the target model is well-trained model, meaning that document groups, indeed can
     describe distinguishable semantic aspects. If not, documents which discuss different real topics could be grouped
     together thus resulting in vague or imprecise keyphrase assignments.
-
-[1] Corina Florescu and Cornelia Caragea. PositionRank: An unsupervised approach to keyphrase extraction from scholarly
-documents. In Proceedings of the 55th Annual Meeting of the Association for Computational Linguistics
-(Volume1: Long Papers), pages 1105–1115, Vancouver, Canada, July 2017. Association for Computational Linguistics.
 """
 
 import argparse
@@ -55,12 +51,13 @@ import os
 
 import pke
 
-from src.core.file import readers
+from src.core.file import readers, writers
 from src.util import docfetch
 from src.util import functions
 from src.util import parallel
 
 READERS_DICT = readers.available_readers
+output_extensions = ("keyphrases",)
 
 
 def _find_document_keyphrases(documents_dict, **kwargs):
@@ -74,7 +71,7 @@ def _find_document_keyphrases(documents_dict, **kwargs):
 
     keyphrases_vote_table = dict()
     for document in documents:
-        text = document[1].replace(chr(0), '')
+        text = document["content"].replace(chr(0), '')
         if text == "nan" or text == "":
             continue
         pos = {'NOUN', 'PROPN', 'ADJ'}
@@ -105,9 +102,10 @@ def _find_document_keyphrases(documents_dict, **kwargs):
     return [{"topic": topic, "topic_keyphrases": topic_keyphrases}]
 
 
-def infer_keyphrases(reader_ref, corpus_topics_file_path, output_dir_path, *input_file_paths,
+def infer_keyphrases(corpus_topics_file_path, output_dir_path, *input_file_paths,
                      output_name=None, logger=None, workers=1, top_n=100,
-                     file_overwrite_confirmation_function=lambda path: True):
+                     file_overwrite_confirmation_function=lambda path: True,
+                     max_file_objects=-1):
     # If given logger is None then use a logger with a null handler
     if not logger:
         logger = logging.getLogger(__name__)
@@ -127,38 +125,12 @@ def infer_keyphrases(reader_ref, corpus_topics_file_path, output_dir_path, *inpu
     assert type(top_n) is int, "Number of top documents must be an integer"
     logger.debug("Number of top documents is an integer.")
 
-    # If reader_ref is not a readers.BaseReader subclass, treat it as the lowercase name of a reader class,
-    # without the "Reader" ending
-    logger.debug("Attempting to infer reader from reader_ref argument.")
-    if not issubclass(type(reader_ref), readers.BaseReader):
-        logger.debug("Argument reader_ref was not a valid readers.BaseReader extension. Attempting to infer reader by"
-                     "treating reader_ref as a readers.BaseReader extension class name.")
-        # Initialize reader
-        if reader_ref not in READERS_DICT:
-            logger.debug("Argument reader_ref was neither a readers.BaseReader extension instance nor a "
-                         "readers.BaseReader extension class name.")
-            logger.debug("Raising error.")
-            raise ValueError(
-                "Reader must be defined either in src.core.file.readers or in application.readers. Given reader '{}' "
-                "was not found".format(reader_ref)
-            )
-        else:
-            logger.debug("Argument reader_ref successfully identified as a readers.BaseReader extension class name.")
-            logger.debug("Attempting to get full absolute paths of defined input files' paths.")
-            input_file_paths = (os.path.abspath(os.path.expanduser(input_file_path)) for input_file_path in
-                                input_file_paths)
-            logger.debug("Initializing an object of the defined reader class, based on the produced input_file_paths.")
-            reader_obj = READERS_DICT[str(reader_ref)](*input_file_paths, logger=logger)
-    else:
-        logger.debug("Argument reader_ref successfully identified as readers.BaseReader extension instance.")
-        reader_obj = reader_ref
-
     # Get output directory path
     logger.debug("Attempting to get full absolute path of defined output directory's path.")
     output_dir_path = os.path.abspath(os.path.expanduser(output_dir_path))
 
     logger.debug("Attempting to get full absolute path of defined corpus topics file's path.")
-    corpus_topics_file_path = os.path.abspath(os.path.expanduser(corpus_topics_file_path))
+    # corpus_topics_file_path = os.path.abspath(os.path.expanduser(corpus_topics_file_path))
 
     # Create output directory path
     # ! May raise:
@@ -176,7 +148,7 @@ def infer_keyphrases(reader_ref, corpus_topics_file_path, output_dir_path, *inpu
         logger.debug("Generating a name based on the current timestamp: {}.".format(
             datetime.datetime.strftime(current_timestamp, "%d-%m-%Y %H:%M:%S")
         ))
-        output_name = "keyphrases_{}{}{}{}{}{}{}".format(
+        output_name = "keyphrases_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             current_timestamp.year,
             current_timestamp.month,
             current_timestamp.day,
@@ -187,29 +159,50 @@ def infer_keyphrases(reader_ref, corpus_topics_file_path, output_dir_path, *inpu
         )
         logger.debug("Assigned name for output files: {}.".format(output_name))
 
-    output_file_name = output_name + ".keyphrases"
-    logger.debug("Constructed keyphrases output file name: {}.".format(output_file_name))
-    output_file_path = os.path.join(output_dir_path, output_file_name)
-    logger.debug("Output file will be saved in: {}.".format(output_file_path))
-    temporary_output_file_name = output_name + ".kp"
-    logger.debug("Constructed temporary workers output file name: {}.".format(temporary_output_file_name))
-    temporary_output_file_path = os.path.join(output_dir_path, temporary_output_file_name)
-    logger.debug("Temporary workers' file will be saved in: {}.".format(temporary_output_file_path))
+    output_name_template = output_name + ".part{}"
 
-    logger.debug("Ensuring that no file, under the path \"{}\" already exists.".format(output_file_path))
-    logger.debug("In case the file exists, a confirmation for overwritting the file is required.")
-    if not file_overwrite_confirmation_function(output_file_path):
-        logger.debug("The file exists and the confirmation was denied.")
-        return
+    output_file_name_templates = [output_name_template + "." + extension for extension in output_extensions]
+
+    logger.debug("Keyphrases' name pattern: {}.".format(output_name_template).format("[NUMBER]"))
+
+    logger.debug("Output files will be saved in: {}.".format(output_dir_path))
+
+    # Call the confirmation function for overwriting files, if similar files already exist
+    logger.debug("Checking whether files with the same naming patterns already exist in \"{}\"".format(
+        output_dir_path
+    ))
+    logger.debug("In case files exist, a confirmation for overwriting the files is required.")
+    for extension in output_extensions:
+        if not file_overwrite_confirmation_function(output_dir_path, (output_name, extension)):
+            return
+
+    # output_file_name = output_name + ".keyphrases"
+    # logger.debug("Constructed keyphrases output file name: {}.".format(output_file_name))
+    # output_file_path = os.path.join(output_dir_path, output_file_name)
+    # logger.debug("Output file will be saved in: {}.".format(output_file_path))
+    # temporary_output_file_name = output_name + ".kp"
+    # logger.debug("Constructed temporary workers output file name: {}.".format(temporary_output_file_name))
+    # temporary_output_file_path = os.path.join(output_dir_path, temporary_output_file_name)
+    # logger.debug("Temporary workers' file will be saved in: {}.".format(temporary_output_file_path))
+    #
+    # logger.debug("Ensuring that no file, under the path \"{}\" already exists.".format(output_file_path))
+    # logger.debug("In case the file exists, a confirmation for overwritting the file is required.")
+    # if not file_overwrite_confirmation_function(output_file_path):
+    #     logger.debug("The file exists and the confirmation was denied.")
+    #     return
 
     logger.info("Loading corpus topics from file \"{}\".".format(corpus_topics_file_path))
-    with open(corpus_topics_file_path, "r", encoding="utf-8") as f_handle:
-        corpus_topics_dict = json.load(f_handle)
+    reader = readers.JSONReader("~/workspaces/thesis-demo/corpus_topics_2005_2020.part1.json",
+                                logger=logger)
+    corpus_reader = readers.JSONReader(*input_file_paths, logger=logger)
+
+    # with open(corpus_topics_file_path, "r", encoding="utf-8") as f_handle:
+    #     corpus_topics_dict = json.load(f_handle)
 
     topic_indexed_dictionary = dict()
     document_indexed_dictionary = dict()
     logger.debug("Constructing topic->list_of_documents map.")
-    for document_topics in corpus_topics_dict:
+    for document_topics in reader:
         document_identifier = document_topics["document_identifier"]
         document_primary_topic = document_topics["top_topics"][0]["topic_index"]
         document_primary_topic_probability = document_topics["top_topics"][0]["probability"]
@@ -238,52 +231,56 @@ def infer_keyphrases(reader_ref, corpus_topics_file_path, output_dir_path, *inpu
 
     logger.debug("Creating multiprocessor.")
     multiprocessor = parallel.Multiprocessor(_find_document_keyphrases, workers, output_dir_path,
-                                             temporary_output_file_name,
-                                             logger=logger, buffer_size=2 * workers)
+                                             output_name, "kp", logger=logger, buffer_size=20000,
+                                             max_objects_per_output_file=max_file_objects)
     logger.debug("Initiating workers. Workers on stand-by.")
-    multiprocessor.start()
     all_topics_keyphrases = dict()
     logger.info("Reading through corpus until the top_n documents of a topic have been collected.")
     logger.debug("Will then feed those documents to a worker which will perform the analysis.")
     topics_served = 0
-    for record in reader_obj:
+    multiprocessor.start()
+    for record in corpus_reader:
         # multiprocessor.feed(record)
-        document_id = record[0]
-        top_document = True
+        document_id = record["id"]
+        top_document = False
         try:
             read_document_primary_topic = document_indexed_dictionary[document_id]
             if document_id in pending_documents[read_document_primary_topic]:
                 pending_documents[read_document_primary_topic].remove(document_id)
+                top_document = True
+                loaded_documents[read_document_primary_topic].append(record)
+                if len(pending_documents[read_document_primary_topic]) == 0:
+                    logger.info(
+                        "All documents for topic {} have been collected. Handing over the documents to a worker.".format(
+                            read_document_primary_topic)
+                    )
+                    multiprocessor.feed(
+                        {
+                            "topic": read_document_primary_topic,
+                            "documents": loaded_documents[read_document_primary_topic]
+                        }
+                    )
+                    logger.debug("Documents for topic {}:".format(read_document_primary_topic))
+                    for document in loaded_documents[read_document_primary_topic]:
+                        logger.debug("\t{}".format(document[0]))
+                    topics_served += 1
+                    logger.info("Topics served: {}".format(topics_served))
+                    loaded_documents[read_document_primary_topic] = []
             else:
                 top_document = False
         except KeyError:
             top_document = False
-        if top_document:
-            loaded_documents[read_document_primary_topic].append(record)
-            if len(pending_documents[read_document_primary_topic]) == 0:
-                logger.info(
-                    "All documents for topic {} have been collected. Handing over the documents to a worker.".format(
-                        read_document_primary_topic)
-                )
-                multiprocessor.feed(
-                    {"topic": read_document_primary_topic, "documents": loaded_documents[read_document_primary_topic]}
-                )
-                logger.debug("Documents for topic {}:".format(read_document_primary_topic))
-                for document in loaded_documents[read_document_primary_topic]:
-                    logger.debug("\t{}".format(document[0]))
-                topics_served += 1
-                logger.info("Topics served: {}".format(topics_served))
-                loaded_documents[read_document_primary_topic] = []
+
     multiprocessor.close()
     logger.info("Keyphrases analysis finished.")
     # REMOVE IT JUST CHECK
     for document_chunk in loaded_documents:
         if len(document_chunk) != 0:
-            print("Topic {} still hasn't been served")
+            print(f"Topic {document_chunk} still hasn't been served")
 
     logger.debug("Retrieving keyphrases analysis results")
-    bf_handle = readers.Bz2BagReader(temporary_output_file_path, logger=logger)
-    for topic_keyphrases in bf_handle:
+    json_reader = readers.JSONReader(*multiprocessor.joined_files_writers[0].created_files, logger=logger)
+    for topic_keyphrases in json_reader:
         all_topics_keyphrases[topic_keyphrases["topic"]] = topic_keyphrases["topic_keyphrases"]
     #     if doc
     #         documents_loaded += 1
@@ -307,21 +304,21 @@ def infer_keyphrases(reader_ref, corpus_topics_file_path, output_dir_path, *inpu
                 assigned_keyphrases.add(constructed_keyphrase)
                 break
 
-    logger.info("Dumping assigned keyphrases to file \"{}\".".format(output_file_path))
-    with open(output_file_path, "w", encoding="utf-8") as f_handle:
-        json.dump(assigned_topic_keyphrases, f_handle, indent=4)
+    # logger.info("Dumping assigned keyphrases to file \"{}\".".format(output_file_path))
+    # with open(output_file_path, "w", encoding="utf-8") as f_handle:
+    #     json.dump(assigned_topic_keyphrases, f_handle, indent=4)
+    with writers.JSONWriter(output_name, output_directory=output_dir_path, max_file_objects_amount=max_file_objects,
+                            output_files_extension=output_extensions[0]) as writer:
+        for t_keyphrase in assigned_topic_keyphrases:
+            writer.write_object(t_keyphrase)
 
-    logger.debug("Deleting temporary file \"{}\".".format(temporary_output_file_path))
-    os.remove(temporary_output_file_path)
+    # logger.debug("Deleting temporary file \"{}\".".format(temporary_output_file_path))
+    for temp_file in multiprocessor.joined_files_writers[0].created_files:
+        os.remove(temp_file)
 
 
 if __name__ == "__main__":
     argument_parser = argparse.ArgumentParser(description="\n".join(docfetch.sanitize_docstring(__doc__)))
-    argument_parser.add_argument("reader", choices=tuple(READERS_DICT.keys()),
-                                 help="An available dataset reader that should handle the dataset of each "
-                                      "case. For more information regarding the available readers you can "
-                                      "use the argument \"python info.py list-readers\". If the target corpus has been "
-                                      "passed from one or more filtering steps, \"bz2bag\" reader should be used.")
     argument_parser.add_argument("input_file_paths", nargs="+", help="One or more path(s) to the corpus files or "
                                                                      "configuration files for each reader")
     argument_parser.add_argument("corpus_topics_dump_file_path", help="Path to a json file containing the corpus "
@@ -354,11 +351,16 @@ if __name__ == "__main__":
                                                                    "of available processors, as this leads to time "
                                                                    "costs due to Inter Process Communications). "
                                                                    "Default: 1", default=1)
+    argument_parser.add_argument("-m", "--max-file-objects", type=int, default=-1,
+                                 help="It controls the maximum amount of objects writen into a JSON output file. Any "
+                                      "negative value or 0 means that the script will save all of the output in a "
+                                      "single file. However this is discouraged for large datasets since certain file "
+                                      "systems have limitations on the maximum size of a file")
 
     args_namespace = argument_parser.parse_args()
     functions.cli_print_license()
 
-    reader_ref = args_namespace.reader
+    max_file_objects = args_namespace.max_file_objects
     output_dir_path = args_namespace.output_dir_path
     input_file_paths = args_namespace.input_file_paths
     corpus_topics_dump_file_path = args_namespace.corpus_topics_dump_file_path
@@ -366,7 +368,7 @@ if __name__ == "__main__":
     top_n = args_namespace.top_n
     if not output_name:
         current_timestamp = datetime.datetime.today()
-        output_name = "keyphrases_{}{}{}{}{}{}{}".format(
+        output_name = "keyphrases_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             current_timestamp.year,
             current_timestamp.month,
             current_timestamp.day,
@@ -379,12 +381,13 @@ if __name__ == "__main__":
 
     logger = functions.construct_logger(__name__, output_dir_path, output_name, args_namespace.log_level)
 
-    file_overwrite_confirmation_function = functions.confirm_file_write
+    file_overwrite_confirmation_function = functions.confirm_batch_file_write
 
     try:
-        infer_keyphrases(reader_ref, corpus_topics_dump_file_path, output_dir_path, *input_file_paths,
+        infer_keyphrases(corpus_topics_dump_file_path, output_dir_path, *input_file_paths,
                          output_name=output_name, logger=logger, workers=workers, top_n=top_n,
-                         file_overwrite_confirmation_function=file_overwrite_confirmation_function)
+                         file_overwrite_confirmation_function=file_overwrite_confirmation_function,
+                         max_file_objects=max_file_objects)
     except Exception as ex:
         logger.critical(str(ex))
         exit(0)

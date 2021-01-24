@@ -16,57 +16,59 @@ import argparse
 
 from src.util import docfetch
 
-argument_parser = argparse.ArgumentParser(description="This script serves as an informative assistant that can be used "
-                                                      "in order to obtain information regarding other parts of this "
-                                                      "application")
-argument_parser.add_argument("command", choices=("list-readers", "list-filters", "list-preprocessors"))
+if __name__ == "__main__":
+    argument_parser = argparse.ArgumentParser(
+        description="This script serves as an informative assistant that can be used "
+                    "in order to obtain information regarding other parts of this "
+                    "application")
+    argument_parser.add_argument("command", choices=("list-readers", "list-filters", "list-preprocessors"))
 
-arguments_namespace = argument_parser.parse_args()
+    arguments_namespace = argument_parser.parse_args()
 
-command = arguments_namespace.command
+    command = arguments_namespace.command
 
-if command == "list-readers":
-    from src.core.file import readers as f_readers
+    if command == "list-readers":
+        from src.core.file import readers as f_readers
 
-    available_readers = f_readers.available_readers
+        available_readers = f_readers.available_readers
 
-    for preprocessor_key in available_readers:
-        preprocessor_class = available_readers[preprocessor_key]
-        documentation = preprocessor_class.__doc__ if preprocessor_class.__doc__ is not None and len(
-            preprocessor_class.__doc__.strip()) > 0 else ""
-        pretty_documentation = "* " + preprocessor_key + " - " + preprocessor_class.__name__ + "\n"
-        if documentation != "":
-            pretty_documentation += "\n    " + "\n    ".join(
-                chunk.replace("\n", "\n    ") for chunk in docfetch.sanitize_docstring(documentation, width=68)
-            ) + "\n"
-        print(pretty_documentation)
+        for preprocessor_key in available_readers:
+            preprocessor_class = available_readers[preprocessor_key]
+            documentation = preprocessor_class.__doc__ if preprocessor_class.__doc__ is not None and len(
+                preprocessor_class.__doc__.strip()) > 0 else ""
+            pretty_documentation = "* " + preprocessor_key + " - " + preprocessor_class.__name__ + "\n"
+            if documentation != "":
+                pretty_documentation += "\n    " + "\n    ".join(
+                    chunk.replace("\n", "\n    ") for chunk in docfetch.sanitize_docstring(documentation, width=68)
+                ) + "\n"
+            print(pretty_documentation)
 
-elif command == "list-filters":
-    from src.core.train import filters
+    elif command == "list-filters":
+        from src.core.train import filters
 
-    available_preprocessors = filters.available_filters
-    for preprocessor_key in available_preprocessors:
-        preprocessor_class = available_preprocessors[preprocessor_key]
-        documentation = preprocessor_class.__doc__ if preprocessor_class.__doc__ is not None and len(
-            preprocessor_class.__doc__.strip()) > 0 else ""
-        pretty_documentation = "* " + preprocessor_key + " - " + preprocessor_class.__name__ + "\n"
-        if documentation != "":
-            pretty_documentation += "\n    " + "\n    ".join(
-                chunk.replace("\n", "\n    ") for chunk in docfetch.sanitize_docstring(documentation, width=68)
-            ) + "\n"
-        print(pretty_documentation)
+        available_preprocessors = filters.available_filters
+        for preprocessor_key in available_preprocessors:
+            preprocessor_class = available_preprocessors[preprocessor_key]
+            documentation = preprocessor_class.__doc__ if preprocessor_class.__doc__ is not None and len(
+                preprocessor_class.__doc__.strip()) > 0 else ""
+            pretty_documentation = "* " + preprocessor_key + " - " + preprocessor_class.__name__ + "\n"
+            if documentation != "":
+                pretty_documentation += "\n    " + "\n    ".join(
+                    chunk.replace("\n", "\n    ") for chunk in docfetch.sanitize_docstring(documentation, width=68)
+                ) + "\n"
+            print(pretty_documentation)
 
-elif command == "list-preprocessors":
-    from src.core.train import preprocessors
+    elif command == "list-preprocessors":
+        from src.core.train import preprocessors
 
-    available_preprocessors = preprocessors.available_preprocessors
-    for preprocessor_key in available_preprocessors:
-        preprocessor_class = available_preprocessors[preprocessor_key]
-        documentation = preprocessor_class.__doc__ if preprocessor_class.__doc__ is not None and len(
-            preprocessor_class.__doc__.strip()) > 0 else ""
-        pretty_documentation = "* " + preprocessor_key + " - " + preprocessor_class.__name__ + "\n"
-        if documentation != "":
-            pretty_documentation += "\n    " + "\n    ".join(
-                chunk.replace("\n", "\n    ") for chunk in docfetch.sanitize_docstring(documentation, width=68)
-            ) + "\n"
-        print(pretty_documentation)
+        available_preprocessors = preprocessors.available_preprocessors
+        for preprocessor_key in available_preprocessors:
+            preprocessor_class = available_preprocessors[preprocessor_key]
+            documentation = preprocessor_class.__doc__ if preprocessor_class.__doc__ is not None and len(
+                preprocessor_class.__doc__.strip()) > 0 else ""
+            pretty_documentation = "* " + preprocessor_key + " - " + preprocessor_class.__name__ + "\n"
+            if documentation != "":
+                pretty_documentation += "\n    " + "\n    ".join(
+                    chunk.replace("\n", "\n    ") for chunk in docfetch.sanitize_docstring(documentation, width=68)
+                ) + "\n"
+            print(pretty_documentation)

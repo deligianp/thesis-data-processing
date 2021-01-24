@@ -15,9 +15,6 @@
 """
 This module can be used in order to filter out texts of a corpus that don't match certain filtering conditions.
 
-The module can use the package-provided readers, as well any other readers defined inside application.readers
-module. Any reader focuses on managing different types of sources and formats of data.
-
 The filters being used by the module can be any of package-provided filters, as well as any other filter defined inside
 application.filters module. Different filters focus on different text metadata and attributes in order to decide whether
 the text should be accepted
@@ -33,12 +30,12 @@ from src.util import docfetch
 from src.util import functions
 from src.util import parallel
 
-READERS_DICT = corpus_readers.available_readers
 FILTERS_DICT = filters.available_filters
+output_extensions = ("filtered",)
 
 
-def filter_corpus(filter_ref, reader_ref, output_dir_path, *input_file_paths, output_name=None, logger=None,
-                  workers=1, file_overwrite_confirmation_function=lambda path: True):
+def filter_corpus(filter_ref, output_dir_path, *input_file_paths, output_name=None, logger=None,
+                  workers=1, max_file_objects=-1, file_overwrite_confirmation_function=lambda *args: True):
     # If given logger is None then use a logger with a null handler
     if not logger:
         logger = logging.getLogger(__name__)
@@ -57,7 +54,8 @@ def filter_corpus(filter_ref, reader_ref, output_dir_path, *input_file_paths, ou
     if not hasattr(filter_ref, '__call__'):
         logger.debug("Argument filterer_ref was not a callable. Attempting to infer filter by treating filter_ref as a "
                      "filter configuration string.")
-        filter_name = filter_ref[0]
+        filter_configuration_string_segments = filter_ref.split()
+        filter_name = filter_configuration_string_segments[0]
         if filter_name not in FILTERS_DICT:
             logger.debug("Argument filter_ref was neither a callable nor could it be broken down to a filter "
                          "configuration string.")
@@ -69,39 +67,13 @@ def filter_corpus(filter_ref, reader_ref, output_dir_path, *input_file_paths, ou
         # filter_factory = FILTERS_DICT[filter_name]()
         filter_arguments = []
         if len(filter_ref) > 0:
-            filter_arguments = filter_ref[1:]
+            filter_arguments = filter_configuration_string_segments[1:]
         logger.debug("Argument filter_ref successfully identified as a filter configuration string.")
         logger.debug("Attempting to create a filter using any defined arguments.")
         filter_obj = FILTERS_DICT[filter_name](*filter_arguments)
     else:
         logger.debug("Argument filter_ref successfully identified as a callable.")
         filter_obj = filter_ref
-
-    # If reader_ref is not a corpus_readers.BaseReader subclass, treat it as the lowercase name of a reader class,
-    # without the "Reader" ending
-    logger.debug("Attempting to infer reader from reader_ref argument.")
-    if not issubclass(type(reader_ref), corpus_readers.BaseReader):
-        logger.debug("Argument reader_ref was not a valid readers.BaseReader extension. Attempting to infer reader by"
-                     "treating reader_ref as a readers.BaseReader extension class name.")
-        # Initialize reader
-        if reader_ref not in READERS_DICT:
-            logger.debug("Argument reader_ref was neither a readers.BaseReader extension instance nor a "
-                         "readers.BaseReader extension class name.")
-            logger.debug("Raising error.")
-            raise ValueError(
-                "Reader must be defined either in src.core.file.readers or in application.readers. Given reader '{}' "
-                "was not found".format(reader_ref)
-            )
-        else:
-            logger.debug("Argument reader_ref successfully identified as a readers.BaseReader extension class name.")
-            logger.debug("Attempting to get full absolute paths of defined input files' paths.")
-            input_file_paths = (os.path.abspath(os.path.expanduser(input_file_path)) for input_file_path in
-                                input_file_paths)
-            logger.debug("Initializing an object of the defined reader class, based on the produced input_file_paths.")
-            reader_obj = READERS_DICT[str(reader_ref)](*input_file_paths, logger=logger)
-    else:
-        logger.debug("Argument reader_ref successfully identified as readers.BaseReader extension instance.")
-        reader_obj = reader_ref
 
     # Get output directory path
     logger.debug("Attempting to get full absolute path of defined output directory's path.")
@@ -123,7 +95,7 @@ def filter_corpus(filter_ref, reader_ref, output_dir_path, *input_file_paths, ou
         logger.debug("Generating a name based on the current timestamp: {}.".format(
             datetime.datetime.strftime(current_timestamp, "%d-%m-%Y %H:%M:%S")
         ))
-        output_name = "filter_{}{}{}{}{}{}{}".format(
+        output_name = "filter_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             current_timestamp.year,
             current_timestamp.month,
             current_timestamp.day,
@@ -134,40 +106,61 @@ def filter_corpus(filter_ref, reader_ref, output_dir_path, *input_file_paths, ou
         )
         logger.debug("Assigned name for output files: {}.".format(output_name))
 
+    output_name_template = output_name + ".part{}"
+
     # Add a .filtered extension for the file that will hold the filtered corpus
-    output_file_name = output_name + ".filtered"
-    logger.debug("Constructed filtered corpus output file name: {}.".format(output_file_name))
+    output_file_name_templates = (output_name_template + "." + extension for extension in output_extensions)
 
-    # Create the output file path
-    output_file_path = os.path.join(output_dir_path, output_file_name)
-    logger.debug("Filtered corpus output file will be saved in: {}.".format(output_file_path))
+    logger.debug("Filtered corpus output files' name pattern: {}.".format(output_name_template).format("[NUMBER]"))
 
-    # Call the confirmation function for overwriting a file, if the output file already exists
-    logger.debug("Ensuring that no file, under the path \"{}\" already exists.".format(output_file_path))
-    logger.debug("In case the file exists, a confirmation for overwritting the file is required.")
-    if not file_overwrite_confirmation_function(output_file_path):
-        return
+    logger.debug("Corpus output files will be saved in: {}.".format(output_dir_path))
+
+    # Call the confirmation function for overwriting files, if similar files already exist
+    logger.debug("Checking whether files with the same naming patterns already exist in \"{}\"".format(
+        output_dir_path
+    ))
+    logger.debug("In case files exist, a confirmation for overwriting the files is required.")
+    for extension in output_extensions:
+        if not file_overwrite_confirmation_function(output_dir_path, (output_name, extension)):
+            return
+
+    reader_obj = corpus_readers.JSONReader(*input_file_paths, logger=logger)
 
     documents_loaded = 0
 
     logger.debug("Creating multiprocessor.")
-    multiprocessor = parallel.Multiprocessor(filter_obj.perform_filter, workers, output_dir_path, output_file_name,
-                                    logger=logger, buffer_size=10000)
+    multiprocessor = parallel.Multiprocessor(filter_obj.perform_filter, workers, output_dir_path, output_name,
+                                             *output_extensions, logger=logger, buffer_size=100000,
+                                             max_objects_per_output_file=max_file_objects)
     logger.debug("Initiating workers. Workers on stand-by.")
     multiprocessor.start()
     for record in reader_obj:
         multiprocessor.feed(record)
         documents_loaded += 1
         if documents_loaded % reporting_batch == 0:
-            logger.info("Attempted to filter {} documents".format(documents_loaded))
-    logger.info("Attempted to filter {} documents".format(documents_loaded))
+            logger.info("{} documents passed to the filter".format(documents_loaded))
+    logger.info("{} documents passed to the filter".format(documents_loaded))
     number_of_items_processed = multiprocessor.close()
 
     logger.info("Successfully filtered and accepted {} documents out of {} totally provided".format(
         number_of_items_processed[0],
         documents_loaded
     ))
-    logger.info("Filtered corpus was saved in \"{}\"".format(output_file_path))
+    # logger.info("Filtered corpus was saved in \"{}\". File names are in the form \"{}\"".format(
+    #     output_dir_path,
+    #     "\", \"".join(output_file_form.format("[NUMBER]") for output_file_form in output_file_name_templates)
+    # ))
+
+    files_to_fetch_for_sample = 3
+    filtered_files_sample = multiprocessor.joined_files_writers[0].created_files[:files_to_fetch_for_sample - 1]
+    if len(multiprocessor.joined_files_writers[0].created_files) >= files_to_fetch_for_sample:
+        if len(multiprocessor.joined_files_writers[0].created_files) > files_to_fetch_for_sample:
+            filtered_files_sample.append("...")
+        filtered_files_sample.append(multiprocessor.joined_files_writers[0].created_files[-1])
+
+    logger.info("Filtered corpus was saved in:\n\t\"{}\"".format("\"\n\t\"".join(
+        (os.path.join(output_dir_path, file_name) for file_name in filtered_files_sample)
+    )))
 
 
 if __name__ == "__main__":
@@ -177,14 +170,9 @@ if __name__ == "__main__":
     # argument_parser.add_argument("property", choices=functions_dict.keys(), help="Target property to filter")
     argument_parser.add_argument("filter", help="A filter configuration corresponding to one of the available filters. "
                                                 "For more information, regarding the available filters you can use the "
-                                                "call \"python info.py list-filters\"", nargs="+")
-    argument_parser.add_argument("reader", help="An available dataset reader that should handle the dataset of each "
-                                                "case. For more information regarding the available readers you can "
-                                                "use the argument \"python info.py list-readers\"",
-                                 choices=tuple(READERS_DICT.keys()),
-                                 default=tuple(READERS_DICT.keys())[0])
-    argument_parser.add_argument("input_file_paths", nargs="+", help="One or more path(s) to the corpus files or "
-                                                                     "configuration files for each reader")
+                                                "call \"python info.py list-filters\"")
+    argument_parser.add_argument("input_file_paths", nargs="+", help="One or more path(s) to the .corpus or .filtered "
+                                                                     "files")
     argument_parser.add_argument("output_dir_path", help="Path to a directory where the filtered dataset will be "
                                                          "saved", )
     argument_parser.add_argument("-o", "--output-name", help="Name to be associated with the output files. If "
@@ -202,6 +190,11 @@ if __name__ == "__main__":
                                       "located in the \"logs\" directory specified above with the name "
                                       "\"debug_[output_name]\", where output_name refers to the given or inferred "
                                       "output name. Default: 1")
+    argument_parser.add_argument("-m", "--max-file-objects", type=int, default=-1,
+                                 help="It controls the maximum amount of objects writen into a JSON output file. Any "
+                                      "negative value or 0 means that the script will save all of the output in a "
+                                      "single file. However this is discouraged for large datasets since certain file "
+                                      "systems have limitations on the maximum size of a file")
     argument_parser.add_argument("-w", "--workers", type=int, help="Number of processes to be used for the task. "
                                                                    "(NOTE: While an increased number of processes will "
                                                                    "speed up the task, it is advised not to define the "
@@ -214,13 +207,12 @@ if __name__ == "__main__":
     functions.cli_print_license()
 
     filter_ref = args_namespace.filter
-    reader_ref = args_namespace.reader
     output_dir_path = args_namespace.output_dir_path
     input_file_paths = args_namespace.input_file_paths
     output_name = args_namespace.output_name
     if not output_name:
         current_timestamp = datetime.datetime.today()
-        output_name = "filter_{}{}{}{}{}{}{}".format(
+        output_name = "filter_{:04}{:02}{:02}{:02}{:02}{:02}{:03}".format(
             current_timestamp.year,
             current_timestamp.month,
             current_timestamp.day,
@@ -231,13 +223,15 @@ if __name__ == "__main__":
         )
     workers = args_namespace.workers
 
+    max_file_objects = args_namespace.max_file_objects
+
     logger = functions.construct_logger(__name__, output_dir_path, output_name, args_namespace.log_level)
 
-    file_overwrite_confirmation_function = functions.confirm_file_write
+    file_overwrite_confirmation_function = functions.confirm_batch_file_write
 
     try:
-        filter_corpus(filter_ref, reader_ref, output_dir_path, *input_file_paths, output_name=output_name,
-                      logger=logger,
+        filter_corpus(filter_ref, output_dir_path, *input_file_paths, output_name=output_name,
+                      logger=logger, max_file_objects=max_file_objects,
                       workers=workers, file_overwrite_confirmation_function=file_overwrite_confirmation_function)
     except Exception as ex:
         logger.critical(str(ex))

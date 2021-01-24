@@ -12,14 +12,21 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>
-import bz2
+"""
+Module that contains the system's readers as well as the BaseReader that custom readers, inside application.readers
+should extend
+
+The module is loaded by all of the data reading scripts and provides all available readers in the scope of this system.
+All reader class definitions are stored inside
+"""
 import importlib.util
 import inspect
 import logging
 import os
-import pickle
 import sys
 from abc import ABCMeta, abstractmethod
+
+import ijson.backends.yajl2_c as ijson
 
 
 class BaseReader(metaclass=ABCMeta):
@@ -33,10 +40,16 @@ class BaseReader(metaclass=ABCMeta):
         pass
 
 
-class Bz2BagReader(BaseReader):
-    """
-    Bz2BagReader documentation
-    """
+class JSONReader(BaseReader):
+
+    def read(self):
+        if self.file_obj is None:
+            iter(self)
+        val = next(self)
+        return val
+
+    def read_batch(self, batch_size):
+        return tuple(next(self) for _ in range(batch_size))
 
     def __init__(self, *file_paths, logger=None):
         self.file_paths = tuple(os.path.abspath(os.path.expanduser(file_path)) for file_path in file_paths if
@@ -56,29 +69,29 @@ class Bz2BagReader(BaseReader):
             self.file_obj.close()
         self.file_index = 0
         self.object_index = 0
-        self.file_obj = bz2.BZ2File(self.file_paths[self.file_index], "r")
-        self.unpickler = pickle.Unpickler(self.file_obj)
+        self.file_obj = open(self.file_paths[self.file_index], "rb")
+        self.json_parser = ijson.items(self.file_obj, "item")
         return self
 
     def __next__(self):
         read_further = True
         while read_further:
             try:
-                object_value = self.unpickler.load()
-            except EOFError:
+                object_value = next(self.json_parser)
+            except StopIteration:
                 self.file_index += 1
                 self.file_obj.close()
                 self.file_obj = None
                 if self.file_index == len(self.file_paths):
                     raise StopIteration
                 else:
-                    self.file_obj = bz2.BZ2File(self.file_paths[self.file_index], "r")
-                    self.unpickler = pickle.Unpickler(self.file_obj)
+                    self.file_obj = open(self.file_paths[self.file_index], "rb")
+                    self.json_parser = ijson.items(self.file_obj, "item")
                     continue
             except OSError:
                 self.logger.error(
                     "An error occurred while attempting to read from the file {}.\nEnsure that the file can be read by "
-                    "the provided reader: Bz2BagReader".format(self.file_paths[self.file_index])
+                    "the provided reader: JSONReader".format(self.file_paths[self.file_index])
                 )
                 self.file_index += 1
                 continue
@@ -86,20 +99,8 @@ class Bz2BagReader(BaseReader):
             self.object_index += 1
             return object_value
 
-    def read(self):
-        if self.file_obj is None:
-            iter(self)
-        val = next(self)
-        return val
-
-    def read_batch(self, batch_size):
-        return tuple(next(self) for _ in range(batch_size))
-
-
-class Bz2BagContentWrapper(Bz2BagReader):
-
-    def __next__(self):
-        return super(Bz2BagContentWrapper, self).__next__()[1]
+    def close(self):
+        pass
 
 
 available_readers = {
