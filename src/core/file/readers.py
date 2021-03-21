@@ -49,7 +49,16 @@ class JSONReader(BaseReader):
         return val
 
     def read_batch(self, batch_size):
-        return tuple(next(self) for _ in range(batch_size))
+        result = []
+        if self.file_obj is None:
+            iter(self)
+        while batch_size > 0:
+            try:
+                result.append(next(self))
+                batch_size -= 1
+            except StopIteration:
+                break
+        return result
 
     def __init__(self, *file_paths, logger=None):
         self.file_paths = tuple(os.path.abspath(os.path.expanduser(file_path)) for file_path in file_paths if

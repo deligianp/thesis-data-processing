@@ -63,13 +63,14 @@ class JSONWriter(BaseWriter):
         if exc_type is None and exc_val is None and exc_tb is None:
             self.close()
         else:
-
+            print(exc_type)
+            print(exc_val)
             # If an error occured inside the context manager, then erase produced files
             for file in self.created_files:
                 try:
                     os.remove(file)
                 except Exception as ex:
-                    pass
+                    raise ex
 
     def __init__(self, output_files_prefix, output_directory=None, max_file_objects_amount=None,
                  output_files_extension=None, buffer_size=1000, indent=None, encoding=None):
